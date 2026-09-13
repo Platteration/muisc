@@ -3,6 +3,12 @@ package dev.muisc.transitions
 import kotlinx.serialization.Serializable
 
 /**
+ * Gain-curve laws. Rule: EQUAL_POWER between two different tracks (uncorrelated at sample level); LINEAR only for
+ * coherent material (a signal into a processed copy of itself, loop repeats, seams between identical samples).
+ */
+enum class FadeLaw { LINEAR, EQUAL_POWER, S_CURVE, EXP }
+
+/**
  * Typed, self-describing tunable parameter of a strategy. Every strategy publishes its specs so the CLI
  * (`--set id=value`), presets and the in-app Transition Lab are generated from one source of truth.
  */

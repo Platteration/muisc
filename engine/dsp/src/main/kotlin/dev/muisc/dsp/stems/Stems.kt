@@ -57,3 +57,14 @@ interface StemSeparator {
     val quality: StemQuality
     fun separate(audio: AudioBuffer): Stems
 }
+
+/**
+ * Integration point for neural source separation (Android: ONNX Runtime + a Demucs-class model chosen by the user).
+ * Contract: input any length up to ~120 s at the engine rate; output four stems of identical shape; `other` MUST be
+ * computed as original - (drums + bass + vocals) so the [Stems] invariant holds regardless of model residual.
+ */
+interface MlStemSeparator : StemSeparator {
+    val modelId: String
+    /** False when the model/runtime is not installed; callers then fall back to a PSEUDO separator. */
+    val available: Boolean
+}

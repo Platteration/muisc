@@ -116,6 +116,18 @@ data class TrackAnalysis(
     val intro: IntroType = IntroType.UNKNOWN,
     val outro: OutroType = OutroType.UNKNOWN,
     val cues: Cues = Cues(),
+    /** Key of the outro (last ~30 s) and intro (first ~30 s) when they differ from the whole-track key; null = same as [key]. */
+    val outroKey: KeyEstimate? = null,
+    val introKey: KeyEstimate? = null,
+    /** Long-term spectra of the outro / intro regions (31 third-octave bands, dB), used by texture matching. Empty = use [ltasDb]. */
+    val outroLtasDb: FloatArray = FloatArray(0),
+    val introLtasDb: FloatArray = FloatArray(0),
+    /** Estimated tuning deviation from A4 = 440 Hz in cents (0 when not estimated). */
+    val tuningCents: Float = 0f,
+    /** Onset positions (engine-rate frames) from the onset detection function; used to pin transients during time-stretching. */
+    val onsetFrames: LongArray = LongArray(0),
+    /** Per-bin median magnitude spectrum of the last ~15 s (513 bins at 22.05 kHz, frame 1024) — the "texture" of the outro for TextureCarry. */
+    val textureMagnitude: FloatArray = FloatArray(0),
     /** Free-form extra numbers for experiments (never relied upon by shipped strategies). */
     val extra: Map<String, Double> = emptyMap(),
     /** Wall-clock milliseconds the analysis took (diagnostics). */
@@ -133,7 +145,7 @@ data class TrackAnalysis(
 
     companion object {
         /** Bump whenever the analysis output changes in a way that invalidates caches. */
-        const val CURRENT_VERSION = 1
+        const val CURRENT_VERSION = 2
         val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = false }
         fun fromJson(s: String): TrackAnalysis = json.decodeFromString(s)
     }

@@ -124,6 +124,12 @@ data class RenderReport(
     val integratedLufs: Float,
     /** Detected artifacts (clicks, level jumps, clipping). Empty when clean. */
     val warnings: List<String> = emptyList(),
+    /** Cache key of this render (strategy id + params + fingerprints + prefs), empty when not cached. */
+    val renderKey: String = "",
+    /** Numeric metrics (metric id -> value) for the Lab / regression tools. */
+    val metrics: Map<String, Double> = emptyMap(),
+    /** Stretch ratio actually used per master beat (empty for non-beat-domain strategies). */
+    val ratioTrace: FloatArray = FloatArray(0),
 )
 
 /** The rendered transition segment plus its plan and diagnostics. */

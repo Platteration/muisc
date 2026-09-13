@@ -44,3 +44,17 @@ class CompositeDecoder(private val decoders: List<AudioDecoder>) : AudioDecoder 
         decoders.firstOrNull { it.canDecode(source) }?.probe(source)
             ?: throw AudioDecodeException("No decoder for $source")
 }
+
+/** Encoder priming/padding in NATIVE frames (LAME/Xing for MP3, iTunSMPB for AAC; 0/0 for lossless). */
+data class GaplessInfo(val encoderDelayFrames: Int, val encoderPaddingFrames: Int) {
+    companion object { val NONE = GaplessInfo(0, 0) }
+}
+
+/**
+ * Opens a track at the ENGINE format: decoder → gapless trim → sample-rate conversion → channel adaptation.
+ * One instance per reader; two readers of the same track (body deck and renderer) must produce identical samples
+ * for identical positions (position-deterministic resampling).
+ */
+interface EngineStreamFactory {
+    fun open(source: AudioSourceId, sampleRate: Int, channels: Int): PcmStream
+}

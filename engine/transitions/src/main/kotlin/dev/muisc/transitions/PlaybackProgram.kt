@@ -1,5 +1,7 @@
 package dev.muisc.transitions
 
+import dev.muisc.transitions.live.LivePlan
+
 /**
  * What the player actually plays: a sample-accurate sequence of segments. Built from the queue, the
  * playback context and the rendered transitions. Body segments reference track frames at the engine
@@ -21,6 +23,9 @@ sealed interface Segment {
      * B's head starting at [bFromFrame].
      */
     data class LiveCrossfade(val from: TrackRef, val to: TrackRef, val aFromFrame: Long, val aToFrame: Long, val bFromFrame: Long, val fadeFrames: Int) : Segment
+
+    /** A real DJ move executed live by the player from a [LivePlan] (bass swap, filter sweep, echo-out, phrase cut, crossfade). */
+    data class Live(val from: TrackRef, val to: TrackRef, val plan: LivePlan) : Segment
 }
 
 data class PlaybackProgram(val segments: List<Segment>) {
@@ -29,6 +34,7 @@ data class PlaybackProgram(val segments: List<Segment>) {
             is Segment.Body -> it.frames
             is Segment.Rendered -> it.rendered.audio.frames.toLong()
             is Segment.LiveCrossfade -> it.aToFrame - it.aFromFrame
+            is Segment.Live -> it.plan.outputFrames.toLong()
         }
     }
 }

@@ -2,6 +2,8 @@ package dev.muisc.analysis
 
 import dev.muisc.analysis.model.TrackAnalysis
 import dev.muisc.audio.AudioBuffer
+import dev.muisc.audio.PcmStream
+import dev.muisc.audio.readAll
 
 /** Progress callback: [fraction] 0..1, [stage] a short label like "beats" or "key". */
 fun interface AnalysisProgress {
@@ -16,6 +18,10 @@ fun interface AnalysisProgress {
  */
 interface TrackAnalyzer {
     fun analyze(audio: AudioBuffer, sourceId: String, fingerprint: String, progress: AnalysisProgress = AnalysisProgress.NONE): TrackAnalysis
+
+    /** Streaming entry point: reads the stream once. Default reads everything into memory; production analyzers may stream. */
+    fun analyze(stream: PcmStream, sourceId: String, fingerprint: String, progress: AnalysisProgress = AnalysisProgress.NONE): TrackAnalysis =
+        analyze(stream.readAll(), sourceId, fingerprint, progress)
 }
 
 /** Persistent cache of analyses keyed by fingerprint + version + sample rate. */
