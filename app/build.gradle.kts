@@ -94,6 +94,7 @@ dependencies {
 
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.palette)
+    implementation(libs.androidx.work.runtime)
     implementation(libs.coil.compose)
 
     testImplementation(libs.kotlin.test)
