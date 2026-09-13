@@ -62,6 +62,8 @@ dependencies {
     implementation(project(":engine:dsp"))
     implementation(project(":engine:analysis"))
     implementation(project(":engine:transitions"))
+    implementation(project(":engine:metrics"))
+    implementation(project(":engine:player"))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)

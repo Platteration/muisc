@@ -18,6 +18,8 @@ dependencies {
     implementation(project(":engine:dsp"))
     implementation(project(":engine:analysis"))
     implementation(project(":engine:transitions"))
+    implementation(project(":engine:metrics"))
+    implementation(project(":engine:player"))
     implementation(libs.clikt)
     implementation(libs.kotlinx.serialization.json)
 

@@ -41,6 +41,8 @@ include(":engine:audio")
 include(":engine:dsp")
 include(":engine:analysis")
 include(":engine:transitions")
+include(":engine:metrics")
+include(":engine:player")
 include(":tools:cli")
 
 if (androidSdkAvailable) {
