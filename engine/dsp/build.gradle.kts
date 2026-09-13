@@ -2,7 +2,15 @@ plugins {
     alias(libs.plugins.kotlin.jvm)
 }
 
-kotlin { jvmToolchain(21) }
+// Compile with the local JDK 21 but emit Java 17 bytecode so the Android app (D8) can consume these modules.
+kotlin {
+    jvmToolchain(21)
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
+}
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
 
 dependencies {
     api(project(":engine:audio"))

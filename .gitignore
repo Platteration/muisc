@@ -25,3 +25,6 @@ app/release/
 # Rendered experiment output
 renders/
 *.wav.tmp
+
+# Claude Code agent worktrees
+.claude/worktrees/
