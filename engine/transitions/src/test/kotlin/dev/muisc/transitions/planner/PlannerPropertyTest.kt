@@ -312,14 +312,15 @@ class PlannerPropertyTest {
         val reg = DefaultStrategyRegistry.default()
         assertEquals("crossfade", reg.strategies.first().id)
         assertNotNull(reg.strategy("crossfade"))
-        val ext = reg.withStrategies(FakeStrategy("phraseCut", score = { _, _ -> 0.5 })).withModifiers(FakeModifier("tempoGlide", { 0.0 }))
+        // Ids deliberately outside the real catalogue so this exercises APPENDING, not replacing.
+        val ext = reg.withStrategies(FakeStrategy("testOnlyStrategy", score = { _, _ -> 0.5 })).withModifiers(FakeModifier("testOnlyModifier", { 0.0 }))
         assertEquals(reg.strategies.size + 1, ext.strategies.size)
-        assertEquals(listOf("tempoGlide"), ext.modifierIds)
+        assertEquals(reg.modifierIds + "testOnlyModifier", ext.modifierIds)
         // Replacing an id keeps its position; removing works; duplicates are rejected.
         val replaced = ext.withStrategies(FakeStrategy("crossfade", score = { _, _ -> 0.5 }))
         assertEquals(ext.strategyIds, replaced.strategyIds)
         assertTrue(replaced.strategy("crossfade") is FakeStrategy)
-        assertEquals(reg.strategyIds, ext.without("phraseCut").strategyIds)
+        assertEquals(reg.strategyIds, ext.without("testOnlyStrategy").strategyIds)
         assertFailsWith<IllegalArgumentException> { DefaultStrategyRegistry(listOf(CrossfadeStrategy(), CrossfadeStrategy())) }
         assertTrue(DefaultStrategyRegistry.empty().strategies.isEmpty())
     }

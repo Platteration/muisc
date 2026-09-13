@@ -1,6 +1,21 @@
 package dev.muisc.transitions
 
+import dev.muisc.transitions.modifiers.TempoGlideModifier
+import dev.muisc.transitions.modifiers.TextureCarryModifier
+import dev.muisc.transitions.strategies.AmbientBridgeStrategy
+import dev.muisc.transitions.strategies.BassSwapStrategy
+import dev.muisc.transitions.strategies.BeatMatchedBlendStrategy
+import dev.muisc.transitions.strategies.BrakeStopStrategy
 import dev.muisc.transitions.strategies.CrossfadeStrategy
+import dev.muisc.transitions.strategies.DrumBreakBridgeStrategy
+import dev.muisc.transitions.strategies.EchoOutStrategy
+import dev.muisc.transitions.strategies.FilterSweepStrategy
+import dev.muisc.transitions.strategies.HarmonicBlendStrategy
+import dev.muisc.transitions.strategies.LoopRollRiserStrategy
+import dev.muisc.transitions.strategies.OutroIntroMinimalStrategy
+import dev.muisc.transitions.strategies.PhraseCutStrategy
+import dev.muisc.transitions.strategies.SpectralFreezeBridgeStrategy
+import dev.muisc.transitions.strategies.StemSwapStrategy
 
 /**
  * The single place every shipped technique is registered. Immutable; [withStrategies] / [withModifiers] derive
@@ -48,26 +63,24 @@ class DefaultStrategyRegistry(
         fun default(): DefaultStrategyRegistry = DefaultStrategyRegistry(
             strategies = listOf(
                 CrossfadeStrategy(),                      // 1  crossfade            — the floor, never blocked
-                // ---- LEAD: append the remaining strategies here after merge (ids per DESIGN.md §12) -----------
-                // AmbientBridgeStrategy(),              // 13 ambientBridge
-                // OutroIntroMinimalStrategy(),          // 2  outroIntroMinimal
-                // SpectralFreezeBridgeStrategy(),       // 12 spectralFreezeBridge
-                // PhraseCutStrategy(),                  // 3  phraseCut
-                // FilterSweepStrategy(),                // 8  filterSweep
-                // EchoOutStrategy(),                    // 9  echoOut
-                // LoopRollRiserStrategy(),              // 10 loopRollRiser
-                // BrakeStopStrategy(),                  // 14 brakeStop
-                // BeatMatchedBlendStrategy(),           // 4  beatMatchedBlend
-                // BassSwapStrategy(),                   // 5  bassSwap
-                // StemSwapStrategy(),                   // 6  stemSwap
-                // DrumBreakBridgeStrategy(),            // 7  drumBreakBridge
-                // HarmonicBlendStrategy(),              // 11 harmonicBlend
+                OutroIntroMinimalStrategy(),              // 2  outroIntroMinimal    — respect the producers' outro/intro
+                PhraseCutStrategy(),                      // 3  phraseCut            — phrase-aligned hard cut
+                BeatMatchedBlendStrategy(),               // 4  beatMatchedBlend     — classic long blend
+                BassSwapStrategy(),                       // 5  bassSwap             — EQ mix with low-band handover
+                StemSwapStrategy(),                       // 6  stemSwap             — stem-by-stem handover
+                DrumBreakBridgeStrategy(),                // 7  drumBreakBridge      — drums-only bridge
+                FilterSweepStrategy(),                    // 8  filterSweep          — resonant sweep out / open in
+                EchoOutStrategy(),                        // 9  echoOut              — beat-synced echo tail
+                LoopRollRiserStrategy(),                  // 10 loopRollRiser        — loop roll + riser into the drop
+                HarmonicBlendStrategy(),                  // 11 harmonicBlend        — key-aware blend with pitch shift
+                SpectralFreezeBridgeStrategy(),           // 12 spectralFreezeBridge — freeze A's last chord
+                AmbientBridgeStrategy(),                  // 13 ambientBridge        — generated bridge, the musical floor
+                BrakeStopStrategy(),                      // 14 brakeStop            — vinyl brake into a cold open
                 // ---------------------------------------------------------------------------------------------
             ),
             modifiers = listOf(
-                // ---- LEAD: append the modifiers here after merge ------------------------------------------------
-                // TempoGlideModifier(),                 // tempoGlide
-                // TextureCarryModifier(),               // textureCarry
+                TempoGlideModifier(),                     // tempoGlide   — walk the master grid from A's tempo to B's
+                TextureCarryModifier(),                   // textureCarry — carry A's texture across and drop it off
                 // ---------------------------------------------------------------------------------------------
             ),
         )

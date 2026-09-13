@@ -26,7 +26,9 @@ class DefaultTransitionRendererTest {
     private val a by lazy { loader["A"]!! }
     private val b by lazy { loader["B"]!! }
     private val prefs by lazy { TransitionPrefs(targetLufs = minOf(a.analysis.loudness.integratedLufs, b.analysis.loudness.integratedLufs).toDouble() - 3.0) }
-    private val registry = DefaultStrategyRegistry.default()
+    // The full catalogue's strategies, but no modifiers: these tests exercise the renderer's own modifier plumbing
+    // with fakes, so the real auto-attaching modifiers (tempoGlide/textureCarry) must not join the candidate.
+    private val registry = DefaultStrategyRegistry(DefaultStrategyRegistry.default().strategies)
     private val planner by lazy { DefaultTransitionPlanner(registry) }
 
     /** A separator that counts calls and returns trivially valid stems (everything in `other`). */

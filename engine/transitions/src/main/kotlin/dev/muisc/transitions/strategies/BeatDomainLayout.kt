@@ -183,6 +183,19 @@ object BeatDomain {
             start = pulled
         }
         if (start < 0) { notes += "A is shorter than the overlap: A starts at its first beat"; start = 0 }
+        // The segment opens with GUARD_FRAMES of A played dry (the splice contract), so A's first touched frame must
+        // leave room for it. A beat at frame < GUARD would put aExitFrame before the start of the file.
+        if (grid.frameOfBeat(start.toDouble()) < Splice.GUARD_FRAMES) {
+            var pushed = start
+            while (pushed <= last && grid.frameOfBeat(pushed.toDouble()) < Splice.GUARD_FRAMES) pushed++
+            while (pushed <= last && !grid.isDownbeat(pushed)) pushed++
+            require(last - pushed >= bpb) {
+                "A (${a.sourceId}) is too short for a beat-domain transition: only ${last - pushed} beats left once the " +
+                    "${Splice.GUARD_FRAMES}-frame dry guard fits before the overlap"
+            }
+            notes += "A's overlap moved to beat $pushed so the ${Splice.GUARD_FRAMES}-frame dry guard fits before it"
+            start = pushed
+        }
         var overlap = overlapBeats
         if (start + overlap > last) {
             overlap = max(bpb, (last - start) / bpb * bpb)
