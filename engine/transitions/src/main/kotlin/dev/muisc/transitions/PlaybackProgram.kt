@@ -32,3 +32,17 @@ data class PlaybackProgram(val segments: List<Segment>) {
         }
     }
 }
+
+/**
+ * Turns a queue into segments, applying the gating rule and whatever renders are available.
+ * Body boundaries follow the splice contract of [TransitionPlan]: a track that has an incoming render starts its
+ * body at `incoming.plan.bEntryFrame`; a track with an outgoing render ends its body at `outgoing.plan.aExitFrame`.
+ * Without renders, in [PlaybackContext.ALBUM] the whole file plays (gapless, no silence trimming); in other contexts
+ * the body spans the analysed trim range.
+ */
+interface ProgramBuilder {
+    fun bodySegment(track: TrackRef, context: PlaybackContext, prefs: TransitionPrefs, incoming: RenderedTransition?, outgoing: RenderedTransition?): Segment.Body
+
+    /** Full program for a static queue; [renders] returns the render for a consecutive pair when one exists. */
+    fun build(queue: List<TrackRef>, context: PlaybackContext, prefs: TransitionPrefs, renders: (TrackRef, TrackRef) -> RenderedTransition?): PlaybackProgram
+}
