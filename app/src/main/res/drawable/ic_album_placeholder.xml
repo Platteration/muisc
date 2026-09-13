@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fallback album art: a neutral rounded tile with a vinyl/note glyph. Tinted at runtime by Coil consumers if desired. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+    <path
+        android:fillColor="#FF3A3A44"
+        android:pathData="M12,0h72a12,12 0 0 1 12,12v72a12,12 0 0 1 -12,12h-72a12,12 0 0 1 -12,-12v-72a12,12 0 0 1 12,-12z" />
+    <path
+        android:fillColor="#FF9A9AAE"
+        android:pathData="M56,22v34.5A10.5,10.5 0 1 1 49,46.6V32l-14,4v28.5A10.5,10.5 0 1 1 28,54.6V30l28,-8z" />
+</vector>
