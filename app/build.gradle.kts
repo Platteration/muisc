@@ -47,6 +47,8 @@ android {
     testOptions { unitTests.isIncludeAndroidResources = true }
 }
 
+tasks.withType<Test>().configureEach { useJUnitPlatform() }
+
 kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) }
 }
