@@ -79,7 +79,17 @@ See `docs/CLI.md` for every command.
 
 ## Status
 
-Engine, analysis, transitions, metrics, player and CLI are built and tested on the JVM. The Android app is written
-against those modules but has not yet been compiled with an Android SDK; the first local build is expected to need a
-short fix-up pass (see `docs/ANDROID_BUILD_NOTES.md`). Neural stem separation is an interface with a documented
-integration point; the shipped pseudo-stems are signal-processing approximations.
+The engine is built and tested on the JVM: 714 tests across audio, DSP, analysis, transitions, metrics, player and
+the CLI. The CLI runs end to end — it analyses a 120 BPM fixture at 119.99 BPM with the right key and sections,
+ranks eleven strategies for a compatible pair, and renders a four-track shuffle into a six-segment DJ set whose
+program-level metrics pass.
+
+The Android app is written against those modules and type-checks offline against the real engine classes (its
+non-UI packages reach zero errors against a hand-written Android stub set), but it has never been compiled with an
+Android SDK. Expect a fix-up pass on the first local build: `docs/ANDROID_BUILD_NOTES.md` is the checklist, and it
+separates what the offline check already proved from what only a real SDK can.
+
+Transition quality is measured, not assumed. `docs/QUALITY.md` records the current numbers on the fixture set and
+lists the failures that are still open, including one level-jump metric that flags a musically-intended drop.
+Neural stem separation is an interface with a documented integration point; the shipped pseudo-stems are signal
+processing, not source separation, and are scored accordingly.
