@@ -156,7 +156,7 @@ class BrakeStopStrategy : TransitionStrategy {
         val lanes = listOf(
             speedLane(geo, p, sr),
             cutoffLane(geo, p, sr),
-            masterBeatLane(a, geo, sr),
+            beatsALane(a, geo, sr),
         )
         return TransitionPlan(
             strategyId = ID,
@@ -391,7 +391,7 @@ class BrakeStopStrategy : TransitionStrategy {
     }
 
     /** One point per A beat inside the segment (before the brake only: after it there is no tempo left). */
-    private fun masterBeatLane(a: TrackAnalysis, geo: Geometry, sr: Int): AutomationLane {
+    private fun beatsALane(a: TrackAnalysis, geo: Geometry, sr: Int): AutomationLane {
         val points = ArrayList<LanePoint>()
         if (!a.grid.isEmpty) {
             val scaleA = sr / a.sampleRate.toDouble()
@@ -403,7 +403,7 @@ class BrakeStopStrategy : TransitionStrategy {
                 beat++
             }
         }
-        return AutomationLane(LANE_MASTER_BEAT, points)
+        return AutomationLane(LANE_BEATS_A, points)
     }
 
     companion object {
@@ -425,7 +425,15 @@ class BrakeStopStrategy : TransitionStrategy {
         const val LANE_SPEED = "platterSpeed"
         const val LANE_LPF = "lpfA"
         const val LANE_B = "gainB"
-        const val LANE_MASTER_BEAT = "masterBeat"
+                /**
+         * Informational lane: one point per beat of **A's own grid** inside the segment, for the Lab's ruler.
+         *
+         * It is deliberately not called `masterBeat`. This strategy is not beat-domain - no deck is slaved to a
+         * [dev.muisc.transitions.core.MasterGrid], B is never stretched - so there is no grid that the whole
+         * render is supposed to land on, and `ArtifactMetrics.beatAlignment*` (which asks exactly that question)
+         * must not be computed for it.
+         */
+        const val LANE_BEATS_A = "beatsA"
 
         /** Cutoff of the speed-tracking low-pass at full speed. */
         const val LPF_TOP_HZ = 18000.0

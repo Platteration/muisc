@@ -273,6 +273,56 @@ class ArtifactMetricsTest {
         assertTrue(ArtifactMetrics.evaluateProgramOutput(elsewhere, listOf(seam, far.toLong())).value(ArtifactMetrics.CLICKS)!! >= 1.0)
     }
 
+    /**
+     * Regression for "clicks in the assembled program": the four-track shuffle mix reported `clicks = 2` on a
+     * program whose every sample is continuous. Both clicks were the metric's own doing.
+     *
+     *  - The check used to slice the program at `seam ± 50 ms` and high-pass the slice from a zero filter state,
+     *    so the first millisecond of every region was a step out of silence into whatever the program happened
+     *    to be playing - 0.2 of first difference on material sitting at 0.35, which is a click by every
+     *    criterion the detector has. Here: a steady 220 Hz tone, continuous by construction, inspected at a
+     *    seam in the middle of it. The tone is in cosine phase and 220 Hz divides the 50 ms window exactly, so
+     *    the frame the old slice began at sat on the tone's peak - the worst case, and 0.44 of first difference
+     *    out of a zeroed filter.
+     *  - The mix listed one seam frame twice (two segments met at the same output frame, with a zero-length body
+     *    between them), and the same region was inspected - and the same defect counted - twice.
+     */
+    @Test
+    fun programSeamsAreInspectedWithContextAndOnlyOnce() {
+        val frames = sr * 2
+        val tone = FloatArray(frames) { (0.8 * kotlin.math.cos(2.0 * Math.PI * 220.0 * it / sr)).toFloat() }
+        val program = AudioBuffer.stereo(sr, tone, tone.copyOf())
+        val seam = frames / 2L
+
+        val clean = ArtifactMetrics.evaluateProgramOutput(program, listOf(seam))
+        assertEquals(0.0, clean.value(ArtifactMetrics.CLICKS), "a continuous signal has no clicks: ${clean.summary()}")
+
+        // A real discontinuity at the seam is still found, and counted once however often the seam is listed.
+        val spliced = program.copy()
+        for (ch in spliced.channels) ch[seam.toInt()] += 0.6f
+        val once = ArtifactMetrics.evaluateProgramOutput(spliced, listOf(seam))
+        assertEquals(1.0, once.value(ArtifactMetrics.CLICKS), once.summary())
+        val twice = ArtifactMetrics.evaluateProgramOutput(spliced, listOf(seam, seam))
+        assertEquals(1.0, twice.value(ArtifactMetrics.CLICKS), "a seam listed twice is one seam: ${twice.summary()}")
+        assertEquals(1.0, twice.value(ArtifactMetrics.SEAMS))
+    }
+
+    /**
+     * A source's entry point is an onset even though nothing precedes it: the detector has no history at frame 0
+     * and used to skip its first blocks, which hid the one onset every render is built around - the incoming
+     * track's downbeat - and let the level check report it as an artifact.
+     */
+    @Test
+    fun aBufferThatStartsLoudStartsWithAnOnset() {
+        val frames = sr / 2
+        val tone = FloatArray(frames) { (0.5 * kotlin.math.sin(2.0 * Math.PI * 220.0 * it / sr)).toFloat() }
+        val onsets = Signals.onsetFrames(AudioBuffer.stereo(sr, tone, tone.copyOf()))
+        assertTrue(onsets.isNotEmpty() && onsets[0] == 0, "frame 0 is an onset: ${onsets.take(4)}")
+        // Silence does not start with one.
+        val quiet = FloatArray(frames)
+        assertTrue(Signals.onsetFrames(AudioBuffer.stereo(sr, quiet, quiet.copyOf())).isEmpty())
+    }
+
     @Test
     fun metricsWithoutSourcesSkipTheSourceOnlyChecks() {
         val report = ArtifactMetrics.evaluate(case.rendered, null)

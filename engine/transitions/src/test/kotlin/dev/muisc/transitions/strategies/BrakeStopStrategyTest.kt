@@ -139,7 +139,7 @@ class BrakeStopStrategyTest {
         assertTrue(rendered.audio.peak() <= 1.0f, "peak ${rendered.audio.peak()}")
         assertEquals(listOf("brake", "stopped", "B enters cold"), rendered.markers.map { it.label })
         assertTrue(plan.lanes.any { it.id == "platterSpeed" } && plan.lanes.any { it.id == "lpfA" })
-        assertTrue(plan.lanes.any { it.id == "masterBeat" && it.points.isNotEmpty() })
+        assertTrue(plan.lanes.any { it.id == "beatsA" && it.points.isNotEmpty() })
         // The brake starts on a downbeat of A.
         val beat = a.analysis.grid.beatAtFrame(plan.aExitFrame + g)
         assertEquals(beat, Math.round(beat).toDouble(), 1e-6)

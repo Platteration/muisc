@@ -127,7 +127,7 @@ class FilterSweepStrategyTest {
         assertTrue(rendered.audio.peak() <= 1.0f, "peak ${rendered.audio.peak()}")
         assertEquals(listOf("sweep starts, B enters filtered", "sweep resolves: B open, A gone"), rendered.markers.map { it.label })
         assertTrue(plan.lanes.any { it.id == "hpfA" } && plan.lanes.any { it.id == "lpfB" })
-        assertTrue(plan.lanes.any { it.id == "masterBeat" && it.points.size >= 32 }, "a masterBeat lane with one point per A beat")
+        assertTrue(plan.lanes.any { it.id == "beatsA" && it.points.size >= 32 }, "a beatsA lane with one point per A beat")
 
         val again = strategy.render(input(plan), RenderContext(prefs, SEED))
         for (c in 0 until rendered.audio.channelCount) assertTrue(rendered.audio[c].contentEquals(again.audio[c]), "renders are bit-identical")

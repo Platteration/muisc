@@ -120,7 +120,7 @@ class LoopRollRiserStrategyTest {
         assertTrue(rendered.audio.peak() <= 1.0f, "peak ${rendered.audio.peak()}")
         assertEquals("roll starts", rendered.markers.first().label)
         assertEquals("drop: B enters", rendered.markers.last().label)
-        assertTrue(plan.lanes.any { it.id == "masterBeat" && it.points.size > 4 })
+        assertTrue(plan.lanes.any { it.id == "beatsA" && it.points.size > 4 })
 
         val again = strategy.render(input(plan), RenderContext(prefs, SEED))
         for (c in 0 until rendered.audio.channelCount) assertTrue(rendered.audio[c].contentEquals(again.audio[c]), "renders are bit-identical")

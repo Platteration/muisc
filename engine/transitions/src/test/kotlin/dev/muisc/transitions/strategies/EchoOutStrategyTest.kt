@@ -132,7 +132,7 @@ class EchoOutStrategyTest {
 
         assertEquals("echoOut", strategy.id)
         assertEquals(
-            listOf("delayBeats", "feedback", "dampHz", "tailBars", "bEnterOnBeat", "wetRampBeats", "preRollBars", "wetDb"),
+            listOf("delayBeats", "feedback", "dampHz", "tailBars", "bEnterOnBeat", "wetRampBeats", "preRollBars", "wetDb", "tailAtEntryDb"),
             strategy.params.map { it.id },
         )
     }
@@ -150,13 +150,54 @@ class EchoOutStrategyTest {
         assertTrue(artifacts.clicks.isEmpty(), "clicks: ${artifacts.clicks}")
         assertTrue(rendered.audio.peak() <= 1.0f, "peak ${rendered.audio.peak()}")
         assertEquals(listOf("A cut into the echo", "B enters under the tail", "tail released"), rendered.markers.map { it.label })
-        assertTrue(plan.lanes.any { it.id == "masterBeat" && it.points.size > 8 })
+        assertTrue(plan.lanes.any { it.id == "beatsA" && it.points.size > 8 })
         // B enters one bar of A after the cut (the first downbeat strictly after it).
         val barA = (4 * 60.0 / a.analysis.grid.bpm * sr).toInt()
         assertEquals((cutOut() + barA).toDouble(), rendered.markers[1].frame.toDouble(), 2.0)
 
         val again = strategy.render(input(plan), RenderContext(prefs, SEED))
         for (c in 0 until rendered.audio.channelCount) assertTrue(rendered.audio[c].contentEquals(again.audio[c]), "renders are bit-identical")
+    }
+
+    /**
+     * Regression for the hole this strategy is supposed to prevent: the tail has to still be *there* when B's
+     * downbeat lands.
+     *
+     * A feedback delay loses `feedback` per repeat plus whatever its loop filters take out of the material, and
+     * on this fixture the second term doubles the decay: with the tail left to its own devices the render played
+     * a second of near-silence between the last audible repeat and B, and B's entry measured as a 35 dB step.
+     * The wet send is now ridden so the tail arrives at B at [EchoOutStrategy.P.tailAtEntryDb] below the level
+     * it had at the cut - a longer, slower echo, not a signal that disappears.
+     */
+    @Test
+    fun theTailIsStillThereWhenBEnters() {
+        val plan = strategy.plan(a.analysis, b.analysis, features, Params.EMPTY, prefs, SEED)
+        val rendered = strategy.render(input(plan, silenceB = true), RenderContext(prefs, SEED))
+        val cut = cutOut()
+        val enter = rendered.markers.first { it.label == "B enters under the tail" }.frame.toInt()
+        val delay = Math.round(0.75 * 60.0 / a.analysis.grid.bpm * sr).toInt()
+        assertTrue(enter - cut >= 2 * delay, "the gap is several repeats long ($cut -> $enter, delay $delay)")
+
+        val atCut = rmsOf(rendered.audio, cut, cut + delay)
+        val atEntry = rmsOf(rendered.audio, enter - delay, enter)
+        val decayDb = 20.0 * kotlin.math.log10(atEntry / atCut)
+        val target = EchoOutStrategy.P.resolve(Params.EMPTY, prefs).double(EchoOutStrategy.P.tailAtEntryDb)
+        assertTrue(decayDb > target - 5.0, "the tail is ${"%.1f".format(decayDb)} dB down at B's entry, wanted about $target")
+        assertTrue(decayDb < 0.5, "the tail still decays over the gap (${"%.1f".format(decayDb)} dB)")
+
+        // The ride is reported, bounded, and really needed on this material.
+        val makeup = rendered.report.metrics["tailMakeupDb"]!!
+        assertTrue(makeup > 3.0 && makeup <= EchoOutStrategy.MAX_TAIL_MAKEUP_DB, "tailMakeupDb $makeup")
+        // ... and the delay is fed through the cut's fade, so the truncation does not come back out of the line
+        // one delay period later as a click.
+        val artifacts = ArtifactDetector(sr).analyze(rendered.audio)
+        assertTrue(artifacts.clicks.isEmpty(), "tail clicks: ${artifacts.clicks}")
+    }
+
+    private fun rmsOf(buffer: AudioBuffer, from: Int, to: Int): Double {
+        var acc = 0.0
+        for (c in 0 until buffer.channelCount) for (i in from until to) acc += buffer[c][i].toDouble() * buffer[c][i]
+        return sqrt(acc / ((to - from) * buffer.channelCount))
     }
 
     /** Musical assertion 1: the repeats are spaced at exactly the delay period. */

@@ -150,7 +150,7 @@ class LoopRollRiserStrategy : TransitionStrategy {
         val lanes = ArrayList<AutomationLane>()
         lanes += rollStepLane(geo, sr)
         lanes += riserLane(geo, p, sr)
-        lanes += masterBeatLane(a, geo, sr)
+        lanes += beatsALane(a, geo, sr)
         return TransitionPlan(
             strategyId = ID,
             params = p,
@@ -414,7 +414,7 @@ class LoopRollRiserStrategy : TransitionStrategy {
     }
 
     /** One point per A beat inside the segment: `value` is A's absolute beat index, `outputSec` where it lands. */
-    private fun masterBeatLane(a: TrackAnalysis, geo: Geometry, sr: Int): AutomationLane {
+    private fun beatsALane(a: TrackAnalysis, geo: Geometry, sr: Int): AutomationLane {
         val points = ArrayList<LanePoint>()
         if (!a.grid.isEmpty) {
             val scaleA = sr / a.sampleRate.toDouble()
@@ -428,7 +428,7 @@ class LoopRollRiserStrategy : TransitionStrategy {
                 beat++
             }
         }
-        return AutomationLane(LANE_MASTER_BEAT, points)
+        return AutomationLane(LANE_BEATS_A, points)
     }
 
     companion object {
@@ -447,7 +447,15 @@ class LoopRollRiserStrategy : TransitionStrategy {
         const val LANE_ROLL = "rollStep"
         const val LANE_RISER = "riserDb"
         const val LANE_B = "gainB"
-        const val LANE_MASTER_BEAT = "masterBeat"
+                /**
+         * Informational lane: one point per beat of **A's own grid** inside the segment, for the Lab's ruler.
+         *
+         * It is deliberately not called `masterBeat`. This strategy is not beat-domain - no deck is slaved to a
+         * [dev.muisc.transitions.core.MasterGrid], B is never stretched - so there is no grid that the whole
+         * render is supposed to land on, and `ArtifactMetrics.beatAlignment*` (which asks exactly that question)
+         * must not be computed for it.
+         */
+        const val LANE_BEATS_A = "beatsA"
 
         const val HPF_FROM_HZ = 20.0
         const val RISER_FROM_HZ = 200.0

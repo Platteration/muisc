@@ -57,7 +57,17 @@ object ArtifactMetrics {
     /** Informational metric of [evaluateProgramOutput]: how many seams were inspected. */
     const val SEAMS = "seams"
 
-    /** Automation lane whose points carry the master beat times of the render (seconds from its first frame). */
+    /**
+     * Automation lane whose points carry the master beat times of the render (seconds from its first frame).
+     *
+     * Publishing it is a strategy's statement that the render is **beat-domain**: both decks are slaved to a
+     * [MasterGrid] and every beat of that grid is supposed to be where the lane says it is. That is the only
+     * situation in which [beatAlignment] means anything, so a strategy that never stretches a deck - `echoOut`,
+     * `phraseCut`, `filterSweep`, `brakeStop`, `loopRollRiser`, all of which let B run at its own tempo - must
+     * publish its beats under a different id (`beatsA`, informational, for the Lab's ruler) and simply has no
+     * beat-alignment metric. Measuring one against A's grid past the point where A stops governing the audio
+     * measures the echo's repeats, the riser, or B's unrelated tempo, and the number it produces is noise.
+     */
     const val MASTER_BEAT_LANE = "masterBeat"
 
     // ---- thresholds (DESIGN.md §9) ----------------------------------------------------------------------
@@ -79,6 +89,18 @@ object ArtifactMetrics {
     const val SEAM_CORRELATION_FAIL = 0.999
     const val BEAT_ALIGNMENT_WARN_MS = 5.0
     const val BEAT_ALIGNMENT_FAIL_MS = 12.0
+    /**
+     * Curvature budget of the loudness ride, in LU/s^2 - and a WARN, never a FAIL.
+     *
+     * Re-derived from the fixture set rather than assumed. Every strategy that *blends* measures below it on the
+     * synthetic pairs (crossfade, beatMatchedBlend, bassSwap and filterSweep all PASS); every strategy whose
+     * musical content is a deliberate step measures far above it (phraseCut 4.2-23.9, echoOut 6.1-9.5,
+     * loopRollRiser 6.5, brakeStop 178). Three LU/s^2 is therefore the right budget for a fade and is not a
+     * defect threshold for a cut: a hard cut is a step, and a step has unbounded curvature however cleanly it is
+     * executed. Raising the number until brakeStop passes would only stop it catching the thing it exists for -
+     * a fade that was supposed to be smooth and is not - so the budget stays where the measurement puts it and
+     * the metric is read against the strategy that produced it.
+     */
     const val LOUDNESS_SMOOTHNESS_WARN = 3.0
     /**
      * Span, in 100 ms grid steps, over which the curvature of the short-term loudness is measured. Short-term
@@ -141,6 +163,20 @@ object ArtifactMetrics {
     /** Half-width of the window [evaluateProgramOutput] inspects around a program seam. */
     const val SEAM_WINDOW_MS = 50.0
 
+    /**
+     * Extra audio [evaluateProgramOutput] reads on each side of the inspected window, analysed but never
+     * counted.
+     *
+     * The click detector high-passes its input, and a filter started on a slice of a continuous signal sees a
+     * step from silence into the signal: two LR4 sections at 8 kHz turn a slice that begins at amplitude 0.35
+     * into a first difference of ~0.2, which is well over [CLICK_MIN_STEP] and ~24 dB above the local RMS —
+     * a click the player never produced. Running the filter over this much material before the window starts
+     * lets the transient decay (the LR4 pair settles in well under a millisecond) and fills the 50 ms local-RMS
+     * window that the click and level statistics compare against, so what is reported is the program's own
+     * discontinuities and nothing else.
+     */
+    const val SEAM_CONTEXT_MS = 50.0
+
     // ---- entry points -----------------------------------------------------------------------------------
 
     /**
@@ -201,15 +237,22 @@ object ArtifactMetrics {
     fun evaluateProgramOutput(pcm: AudioBuffer, seams: List<Long>): MetricsReport {
         val sr = pcm.sampleRate
         val half = Signals.msFrames(SEAM_WINDOW_MS, sr)
+        val context = Signals.msFrames(SEAM_CONTEXT_MS, sr)
         var clicks = 0.0
         var jump = 0.0
-        for (seam in seams) {
-            val from = max(0L, seam - half).toInt()
-            val to = min(pcm.frames.toLong(), seam + half).toInt()
+        // Two segments can meet at the same output frame (a zero-length body between two transitions). That is
+        // one seam to listen to, not two, and counting the region twice would double every defect found in it.
+        val inspected = seams.filter { it in 0..pcm.frames.toLong() }.distinct().sorted()
+        for (seam in inspected) {
+            val from = max(0L, seam - half - context).toInt()
+            val to = min(pcm.frames.toLong(), seam + half + context).toInt()
             if (to - from < 4) continue
             val region = pcm.slice(from, to)
-            clicks += clickCount(region, IntArray(0))
-            jump = max(jump, levelJumpDb(region, Signals.onsetFrames(region)))
+            // The window that counts, in region coordinates; everything outside it is filter warm-up only.
+            val roiFrom = (max(0L, seam - half) - from).toInt()
+            val roiTo = (min(pcm.frames.toLong(), seam + half) - from).toInt()
+            clicks += clickCount(region, IntArray(0), roiFrom, roiTo)
+            jump = max(jump, levelJumpDb(region, Signals.onsetFrames(region), roiFrom, roiTo))
         }
         return MetricsReport(
             listOf(
@@ -218,7 +261,7 @@ object ArtifactMetrics {
                 truePeak(pcm),
                 clipping(pcm),
                 nanInf(pcm),
-                Metric.info(SEAMS, seams.size.toDouble(), "count"),
+                Metric.info(SEAMS, inspected.size.toDouble(), "count"),
             ),
         )
     }
@@ -233,7 +276,14 @@ object ArtifactMetrics {
     fun clicks(audio: AudioBuffer, excludedFrames: IntArray = IntArray(0)): Metric =
         Metric.upper(CLICKS, clickCount(audio, excludedFrames).toDouble(), "count", CLICKS_FAIL, CLICKS_FAIL)
 
-    fun clickCount(audio: AudioBuffer, excludedFrames: IntArray): Int {
+    /**
+     * [clicks] as a count. [fromFrame] / [toFrame] narrow the frames that are *counted* without narrowing the
+     * frames that are *analysed*: the high-pass, the first difference and the local RMS still run over the whole
+     * buffer, so a caller that wants a click count for a short region passes the region plus context (see
+     * [SEAM_CONTEXT_MS]) and the region's own bounds here, instead of slicing and re-starting the filter on a
+     * signal that is not silent at the cut.
+     */
+    fun clickCount(audio: AudioBuffer, excludedFrames: IntArray, fromFrame: Int = 0, toFrame: Int = audio.frames): Int {
         val sr = audio.sampleRate
         if (audio.frames < 8) return 0
         val x = Signals.mono(audio)
@@ -253,6 +303,7 @@ object ArtifactMetrics {
             var step = 0.0
             for (i in from until to) { val a = abs(d[i]).toDouble(); if (a > step) step = a }
             if (step < CLICK_MIN_STEP) continue
+            if (from + w / 2 < fromFrame || from + w / 2 >= toFrame) continue
             val lo = max(0, from - local)
             val hi = min(d.size, to + local)
             val energyAround = (prefix[hi] - prefix[lo]) - (prefix[to] - prefix[from])
@@ -281,7 +332,12 @@ object ArtifactMetrics {
     fun levelJump(audio: AudioBuffer, excludedFrames: IntArray = IntArray(0)): Metric =
         Metric.upper(LEVEL_JUMP_DB, levelJumpDb(audio, excludedFrames), "dB", LEVEL_JUMP_WARN_DB, LEVEL_JUMP_FAIL_DB)
 
-    fun levelJumpDb(audio: AudioBuffer, excludedFrames: IntArray): Double {
+    /**
+     * [levelJump] as a number. [fromFrame] / [toFrame] narrow the window boundaries that are *considered*
+     * without narrowing the material the hold windows on each side are measured over - the same region/context
+     * split [clickCount] uses.
+     */
+    fun levelJumpDb(audio: AudioBuffer, excludedFrames: IntArray, fromFrame: Int = 0, toFrame: Int = audio.frames): Double {
         val sr = audio.sampleRate
         val w = Signals.msFrames(LEVEL_WINDOW_MS, sr)
         val db = Signals.blockRmsDb(Signals.mono(audio), w)
@@ -290,6 +346,7 @@ object ArtifactMetrics {
         val guard = Signals.msFrames(LEVEL_ONSET_GUARD_MS, sr)
         var worst = 0.0
         for (k in hold..db.size - hold) {
+            if (k * w < fromFrame || k * w >= toFrame) continue
             if (nearAny(excludedFrames, k * w, guard)) continue
             var preMin = Double.MAX_VALUE; var preMax = -Double.MAX_VALUE
             for (j in k - hold until k) { val v = db[j]; if (v < preMin) preMin = v; if (v > preMax) preMax = v }
@@ -392,6 +449,8 @@ object ArtifactMetrics {
      * Onsets of the render (1 ms ODF with parabolic sub-block interpolation) matched to the master beat times:
      * median and maximum absolute distance in milliseconds. Beats with no onset within
      * [BEAT_MATCH_WINDOW_MS] are not counted; when nothing matches, no metric is produced.
+     *
+     * Only beat-domain renders have master beats at all - see [MASTER_BEAT_LANE].
      */
     fun beatAlignment(rendered: RenderedTransition, masterBeats: DoubleArray?): List<Metric> {
         if (masterBeats == null || masterBeats.isEmpty()) return emptyList()
@@ -534,16 +593,19 @@ object ArtifactMetrics {
      * Onsets of both source windows expressed in output frames (see the object doc). Sorted ascending; empty
      * when no [input] is available, which simply makes the click and level checks stricter.
      */
-    fun sourceOnsetsInOutput(rendered: RenderedTransition, input: TransitionInput?): IntArray {
+    fun sourceOnsetsInOutput(rendered: RenderedTransition, input: TransitionInput?): IntArray =
+        mapSourceMarks(rendered, input) { Signals.onsetFrames(it) }
+
+    private inline fun mapSourceMarks(rendered: RenderedTransition, input: TransitionInput?, marks: (AudioBuffer) -> IntArray): IntArray {
         if (input == null) return IntArray(0)
         val plan = rendered.plan
         val frames = rendered.audio.frames
         val acc = ArrayList<Int>()
-        for (f in Signals.onsetFrames(input.aAudio)) {
+        for (f in marks(input.aAudio)) {
             val o = f - plan.aExitOffset
             if (o in 0 until frames) acc += o
         }
-        for (f in Signals.onsetFrames(input.bAudio)) {
+        for (f in marks(input.bAudio)) {
             val o = f + frames - plan.bEntryOffset
             if (o in 0 until frames) acc += o
         }
@@ -562,6 +624,13 @@ object ArtifactMetrics {
      * a catastrophic level jump. Judging a render's own attacks by themselves is weaker than judging them
      * against the sources — a gain step that happens to sit exactly on an attack is excused — so `evaluate` and
      * `installChecks` should always be given the [TransitionInput] when one exists.
+     *
+     * Known limit: the exclusion covers the sources' note *starts*, not their note *ends*. A source whose level
+     * drops sharply between beats - the synthetic 140 BPM fixture does, 107 ms before each kick - is reproduced
+     * faithfully by the render and still scored as a level jump, and an effect that time-shifts the source (the
+     * echo tail) moves such a step away from the position the mapping knows about. Both are over-reporting, not
+     * missed defects. Fixing them needs the source's own step profile rather than a set of frames, which is a
+     * bigger change than this metric has earned so far.
      */
     fun levelOnsets(audio: AudioBuffer, input: TransitionInput?, sourceOnsets: IntArray): IntArray =
         if (input != null) sourceOnsets else Signals.onsetFrames(audio)

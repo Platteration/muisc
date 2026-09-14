@@ -120,6 +120,12 @@ internal object Signals {
      * 3 ms non-overlapping blocks; block k is an onset when its RMS is [riseDb] above the loudest of the
      * [lookBack] preceding blocks and above an absolute floor; the reported frame is the block start. Onsets
      * closer than 20 ms are merged.
+     *
+     * The first blocks have no history, and "no history" means silence, not "cannot decide": a buffer that
+     * starts above [floorDb] starts with an attack. That matters because the buffers this is run on are cut
+     * exactly at musical events - a strategy's B window begins on B's entry downbeat, its A window on A's exit
+     * beat - so refusing to look at block 0 hid the single most important onset of every render and let the
+     * level check report the incoming track's own downbeat as an artifact.
      */
     fun onsetFrames(
         buffer: AudioBuffer,
@@ -133,15 +139,15 @@ internal object Signals {
         val x = mono(buffer)
         val block = msFrames(blockMs, sr)
         val dbs = blockRmsDb(x, block)
-        if (dbs.size < lookBack + 1) return IntArray(0)
+        if (dbs.isEmpty()) return IntArray(0)
         val spacing = max(1, Math.round(minSpacingMs / blockMs).toInt())
         val out = ArrayList<Int>()
         var lastBlock = -spacing - 1
-        for (k in lookBack until dbs.size) {
+        for (k in dbs.indices) {
             val v = dbs[k]
             if (v < floorDb) continue
             var pre = DB_FLOOR
-            for (j in k - lookBack until k) if (dbs[j] > pre) pre = dbs[j]
+            for (j in max(0, k - lookBack) until k) if (dbs[j] > pre) pre = dbs[j]
             if (v - pre < riseDb) continue
             if (k - lastBlock < spacing) continue
             out += k * block

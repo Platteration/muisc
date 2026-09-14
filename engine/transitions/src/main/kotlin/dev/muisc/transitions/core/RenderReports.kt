@@ -25,7 +25,18 @@ import kotlin.math.abs
 object RenderReports {
     const val DEFAULT_CEILING_DBTP: Double = -1.0
     const val GUARD_FRAMES: Int = Splice.GUARD_FRAMES
-    const val GUARD_TOLERANCE: Float = 1e-3f
+    /**
+     * How far the limiter may move a guard-region sample before [finalize] restores that guard verbatim.
+     *
+     * This has to be *tighter* than the smallest deviation `ArtifactMetrics.seamIdentity` is willing to call a
+     * splice-contract violation (its WARN is 1e-4, its FAIL 1e-3), or the renderer signs off on renders the
+     * metric then flags for ever: a segment whose loud side sits inside the post-roll - a hard cut straight into
+     * B's downbeat, say - had the limiter shaving ~3e-4 off B's verbatim frames and reported `seamIdentity`
+     * WARN on every render, while `finalize` considered the guard untouched. At 1e-6 (float noise on material
+     * that peaks near full scale) any real gain reduction in a guard is restored, which costs one array copy and
+     * a 256-frame blend on the renders that need it.
+     */
+    const val GUARD_TOLERANCE: Float = 1e-6f
     private const val RESTORE_BLEND_FRAMES = 256
 
     /** Outcome of [finalize]. */

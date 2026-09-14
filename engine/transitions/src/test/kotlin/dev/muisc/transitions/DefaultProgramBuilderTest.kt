@@ -108,4 +108,46 @@ class DefaultProgramBuilderTest {
         assertEquals(1, builder.build(listOf(a), PlaybackContext.SINGLE, prefs, renders).segments.size)
         assertEquals(0, builder.build(emptyList(), PlaybackContext.PLAYLIST, prefs, renders).segments.size)
     }
+
+    /**
+     * Regression: the two transitions around a track are planned independently, so the one out of it can be
+     * scheduled at or before the point the one into it hands over. The mix that exposed this had `echoOut`
+     * handing t126Am over at 13.9 s and `phraseCut` wanting to cut it at 5.6 s, which the clamp in
+     * [DefaultProgramBuilder.bodySegment] turned into a zero-length body: a track scheduled with none of itself
+     * playing, and an eight-second jump backwards inside it.
+     */
+    @Test
+    fun aTrackIsNeverScheduledWithoutRoomToPlay() {
+        val a = track("a"); val b = track("b"); val c = track("c")
+        val rAB = fakeRender(aExit = 50L * sr, bEntry = 30L * sr)
+        val rBC = fakeRender(aExit = 20L * sr, bEntry = 5L * sr) // cuts b *before* the echo handed it over
+
+        val program = builder.build(listOf(a, b, c), PlaybackContext.PLAYLIST, prefs) { x, _ ->
+            if (x.id == "a") rAB else rBC
+        }
+        val bodies = program.segments.filterIsInstance<Segment.Body>()
+        assertEquals(3, bodies.size)
+        for (body in bodies) assertTrue(body.frames >= builder.minBodyFrames(body.track, PlaybackContext.PLAYLIST, prefs), "$body")
+        // The later of the two transitions is the one that gives way; the pair is played body-to-body.
+        assertEquals(listOf(rAB), program.segments.filterIsInstance<Segment.Rendered>().map { it.rendered })
+        assertEquals(30L * sr, bodies[1].fromFrame)
+        assertEquals(b.analysis.trimEndFrame, bodies[1].toFrame)
+        assertEquals(c.analysis.trimStartFrame, bodies[2].fromFrame)
+
+        // When the incoming render alone leaves nothing, that one goes too.
+        val greedy = builder.build(listOf(a, b), PlaybackContext.PLAYLIST, prefs) { _, _ -> fakeRender(aExit = 50L * sr, bEntry = b.analysis.trimEndFrame - 100) }
+        assertTrue(greedy.segments.none { it is Segment.Rendered }, "${greedy.segments}")
+        assertEquals(b.analysis.trimStartFrame, (greedy.segments[1] as Segment.Body).fromFrame)
+
+        // A minimum that a very short track could never meet does not bar it from having transitions at all:
+        // the rule asks for one bar, and never for more than half of what the track has.
+        val tiny = track("tiny", seconds = 1.5)
+        val min = builder.minBodyFrames(tiny, PlaybackContext.PLAYLIST, prefs)
+        val playable = tiny.analysis.trimEndFrame - tiny.analysis.trimStartFrame
+        assertTrue(min in 1..(playable / 2), "min $min of playable $playable")
+        val short = builder.build(listOf(a, tiny, c), PlaybackContext.PLAYLIST, prefs) { x, _ ->
+            if (x.id == "a") fakeRender(aExit = 50L * sr, bEntry = tiny.analysis.trimStartFrame + min) else null
+        }
+        assertEquals(1, short.segments.filterIsInstance<Segment.Rendered>().size, "${short.segments}")
+    }
 }

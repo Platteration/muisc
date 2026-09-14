@@ -74,9 +74,27 @@ import kotlin.math.min
  *    outro the repeats smear. Lower [P.feedback].
  *  - If A's last phrase start is wrong the cut lands mid-phrase and the repeats fall on the wrong side of the
  *    beat — gated on `gridConfidenceA`.
- *  - B arrives at full level under a tail that has already decayed, so the artifact detector reports a level jump
- *    at its entry. That jump is the transition: it is the downbeat everything has been waiting for, and only the
- *    5 ms declick stands between the tail and B's first frame.
+ *  - B arrives at full level under the tail. That step is the transition — it is the downbeat everything has been
+ *    waiting for — but it is only musical while the tail is still *there*: see "keeping the tail alive" below.
+ *
+ * ## Keeping the tail alive (why the wet send is ridden)
+ * A feedback delay loses `feedback` per repeat *plus* whatever the loop's low-pass and high-pass take out of the
+ * material, and the second term is the big one: measured on the synthetic 120 BPM fixture, a nominal 0.72
+ * feedback (−2.9 dB a repeat) decays at −5.2 dB a repeat, so by the time B lands one bar after the cut the tail
+ * is 26 dB down — inaudible. The segment then plays a second of near-silence and slams the new track in at full
+ * level, which is exactly the hole this strategy exists to avoid (and reads as a 35 dB `levelJumpDb`).
+ *
+ * The fix is the move a DJ makes with the other hand: ride the echo return up as it decays. [P.tailAtEntryDb]
+ * states where the tail should be when B's downbeat lands, relative to A's dry level at the cut, and the wet
+ * lane carries a dB-linear ride from 0 dB at the cut to whatever makes that true (capped at
+ * [MAX_TAIL_MAKEUP_DB]). The ride is released again over the bar after B's entry, so the last repeats die under
+ * the new track at their natural rate and nothing extra leaks towards the seam. What the listener hears is a
+ * longer, slower echo — the same thing a higher feedback would give, without asking the loop to be stable at a
+ * gain it cannot hold.
+ *
+ * The amount of ride cannot be known before the tail exists: [plan] publishes the `echoTail` lane it predicts
+ * from `feedback` alone, [render] measures the tail it actually produced and republishes the lane it used, and
+ * reports the difference as `tailMakeupDb`.
  */
 class EchoOutStrategy : TransitionStrategy {
 
@@ -90,6 +108,7 @@ class EchoOutStrategy : TransitionStrategy {
         val wetRampBeats = double("wetRampBeats", "Send ramp", 1.0, 0.0, 4.0, "beats", "How long the echo send takes to open before the cut")
         val preRollBars = int("preRollBars", "Pre-roll", 1, 1, 4, "bars", "Bars of A played (and fed to the delay) before the cut")
         val wetDb = double("wetDb", "Tail level", 0.0, -18.0, 6.0, "dB", "Level of the echo tail relative to A")
+        val tailAtEntryDb = double("tailAtEntryDb", "Tail at B", -9.0, -30.0, 0.0, "dB", "Where the tail should still be when B's downbeat lands, relative to A's dry level at the cut")
     }
 
     override val id: String get() = ID
@@ -156,18 +175,23 @@ class EchoOutStrategy : TransitionStrategy {
             "released to silence over its last quarter so nothing spills into B"
         notes += "B enters on A's downbeat ${geo.bEnterBeat} (${"%.2f".format((geo.bEnterOut - geo.cutOut).toDouble() / sr)} s after the cut) at its beat ${geo.bBeat}"
         if (geo.bpmA < SLOW_BPM && p.choice(P.delayBeats) == "1.0") notes += "a 1-beat echo at ${"%.0f".format(geo.bpmA)} BPM will sound like a slap-back"
+        val makeupDb = predictedMakeupDb(geo, p)
+        if (makeupDb > 0.0) {
+            notes += "echo return ridden +${"%.1f".format(makeupDb)} dB over the gap so the tail is still at " +
+                "${"%.0f".format(p.double(P.tailAtEntryDb))} dB when B lands, released over the bar after it"
+        }
         val lanes = ArrayList<AutomationLane>()
-        val (dry, wet, bGain) = lanes(geo)
+        val (dry, wet, bGain) = lanes(geo, makeupDb)
         lanes += dry.toAutomationLane(sr)
         lanes += wet.toAutomationLane(sr)
         lanes += bGain.toAutomationLane(sr)
-        lanes += masterBeatLane(a, geo, sr)
+        lanes += beatsALane(a, geo, sr)
         return TransitionPlan(
             strategyId = ID,
             params = p,
             aExitFrame = geo.aExit,
             bEntryFrame = geo.bEntry,
-            aWindow = FrameRange(geo.aExit, geo.cutA),
+            aWindow = FrameRange(geo.aExit, geo.aWindowEnd),
             bWindow = FrameRange(geo.bStart, geo.bEntry),
             expectedOutputFrames = geo.outFrames,
             lanes = lanes,
@@ -184,11 +208,12 @@ class EchoOutStrategy : TransitionStrategy {
         val geo = geometry(input.aAnalysis, input.bAnalysis, p, ctx.prefs)
         val sr = ctx.sampleRate
         val ch = input.aAudio.channelCount
-        val (dryLane, wetLane, bLane) = lanes(geo)
+        val (dryLane, _, bLane) = lanes(geo, 0.0)
 
         val out = AudioBuffer.silence(sr, ch, geo.outFrames)
-        // 1. A dry up to the cut (the pre-roll is untouched: the dry lane is 1.0 there).
-        Splice.addInPlace(out, input.aAudio, dstOffset = 0, gain = dryLane, srcOffset = 0, frames = min(input.aAudio.frames, geo.cutOut))
+        // 1. A dry up to the cut and through its fade-out (the pre-roll is untouched: the dry lane is 1.0 there).
+        val dryFrames = min(input.aAudio.frames, geo.cutOut + CUT_FADE_FRAMES.toInt())
+        Splice.addInPlace(out, input.aAudio, dstOffset = 0, gain = dryLane, srcOffset = 0, frames = dryFrames)
         ctx.progress(0.2)
 
         // 2. The echo: A's dry signal through the delay, cut at the same frame, ringing on for the tail.
@@ -198,8 +223,19 @@ class EchoOutStrategy : TransitionStrategy {
         delay.mix = 1.0 // wet only: the dry path above is the one the listener hears before the cut
         delay.setLowPass(p.double(P.dampHz))
         delay.setHighPass(LOOP_HIGH_PASS_HZ)
-        val feed = min(input.aAudio.frames, geo.cutOut)
-        val echo = delay.echoOut(sliceOf(input.aAudio, feed), feed, geo.tail)
+        // The delay is fed A *through the dry fader*, fade-out included: the send is post-fader, as it is on a
+        // mixer. Feeding it A truncated at the cut instead puts a step into the delay line, and a step in a
+        // delay line is a click exactly one delay period later - which is what `clicks = 1` was on the
+        // 140 BPM fixture, 14 175 frames (0.75 beat) after the cut.
+        val feed = dryFrames
+        val fed = sliceOf(input.aAudio, feed)
+        for (c in 0 until ch) dryLane.applyInPlace(fed[c], 0L, 0, feed)
+        val echo = delay.echoOut(fed, feed, (geo.cutOut + geo.tail - feed).coerceAtLeast(0))
+        // How much the tail really lost between the cut and B's downbeat, measured over one delay period at each
+        // end, and the ride that turns that into the intended `tailAtEntryDb` (see the class doc).
+        val naturalDb = measuredTailDecayDb(echo, geo)
+        val makeupDb = (p.double(P.tailAtEntryDb) - naturalDb).coerceIn(0.0, MAX_TAIL_MAKEUP_DB)
+        val wetLane = lanes(geo, makeupDb).second
         Splice.addInPlace(out, echo, dstOffset = 0, gain = wetLane, srcOffset = 0, frames = echo.frames)
         ctx.progress(0.7)
 
@@ -221,21 +257,25 @@ class EchoOutStrategy : TransitionStrategy {
             "bEnterOutputFrame" to geo.bEnterOut.toDouble(),
             "limited" to (if (fin.limited) 1.0 else 0.0),
             "gainReductionDb" to fin.gainReductionDb,
+            "tailDecayDb" to naturalDb,
+            "tailMakeupDb" to makeupDb,
         )
         val report = RenderReports.build(out, (System.nanoTime() - t0) / 1_000_000, metrics = metrics, warnings = fin.warnings)
         ctx.progress(1.0)
-        return RenderedTransition(plan, out, markers, report)
+        // The plan's lanes are the Lab's picture of the render: publish the ride that was actually used.
+        val rendered = plan.copy(lanes = plan.lanes.map { if (it.id == LANE_WET) wetLane.toAutomationLane(sr) else it })
+        return RenderedTransition(rendered, out, markers, report)
     }
 
-    /** The first [frames] frames of [src] as a buffer (the delay is fed exactly A's contribution up to the cut). */
+    /** A private copy of the first [frames] frames of [src] (the dry lane is applied to it in place). */
     private fun sliceOf(src: AudioBuffer, frames: Int): AudioBuffer =
-        if (frames == src.frames) src else AudioBuffer(src.sampleRate, Array(src.channelCount) { src[it].copyOfRange(0, frames) })
+        AudioBuffer(src.sampleRate, Array(src.channelCount) { src[it].copyOfRange(0, frames) })
 
     // ---------------------------------------------------------------------------------------------- geometry
 
     /** Frames and beats shared by [plan] and [render]. */
     private class Geometry(
-        val aExit: Long, val cutA: Long, val cutBeat: Int, val cutKind: String,
+        val aExit: Long, val cutA: Long, val aWindowEnd: Long, val cutBeat: Int, val cutKind: String,
         val bStart: Long, val bBeat: Int, val bEntry: Long, val bEnterBeat: Int,
         val cutOut: Int, val bEnterOut: Int, val outFrames: Int,
         val delayFrames: Int, val tail: Int, val echoes: Int, val wetRamp: Int, val wetLevel: Double,
@@ -281,6 +321,11 @@ class EchoOutStrategy : TransitionStrategy {
         if (cutBeat < 0) cutKind = "trim end"
         val aExit = cutA - need
         val cutOut = g + pre
+        // A's window runs [CUT_FADE_FRAMES] past the cut so the fade-out at the cut has material to fade: with a
+        // window that stopped at the cut the "10 ms declick" multiplied frames that were not there, and both the
+        // dry path and the delay's input ended in a step (the step comes back out of the delay line one delay
+        // period later, as a click).
+        val aWindowEnd = minOf(cutA + CUT_FADE_FRAMES, fa(a.totalFrames)).coerceAtLeast(cutA)
 
         // Delay time and tail length.
         val beats = p.choice(P.delayBeats).toDoubleOrNull() ?: 0.75
@@ -319,7 +364,7 @@ class EchoOutStrategy : TransitionStrategy {
         val bEntry = bStart + (outFrames - bEnterOut)
         val wetRamp = Math.round(p.double(P.wetRampBeats) * beatFramesA).toInt().coerceIn(0, pre)
         return Geometry(
-            aExit = aExit, cutA = cutA, cutBeat = cutBeat, cutKind = cutKind,
+            aExit = aExit, cutA = cutA, aWindowEnd = aWindowEnd, cutBeat = cutBeat, cutKind = cutKind,
             bStart = bStart, bBeat = bBeat, bEntry = bEntry, bEnterBeat = enterBeat,
             cutOut = cutOut, bEnterOut = bEnterOut, outFrames = outFrames,
             delayFrames = delayFrames, tail = tail, echoes = echoes, wetRamp = wetRamp,
@@ -328,27 +373,84 @@ class EchoOutStrategy : TransitionStrategy {
     }
 
     /**
-     * Dry A (unity, then cut with a short declick), the wet send (up over the last beats before the cut, held
-     * through the tail, released to exactly 0), and B's gain (a declick fade at its entry, then unity).
-     * All three are sampled in OUTPUT frames.
+     * Dry A (unity, then cut with a short declick), the wet send (up over the last beats before the cut, ridden
+     * by [makeupDb] across the gap so the tail is still audible when B lands, released back over the bar after
+     * it and then to exactly 0), and B's gain (a declick fade at its entry, then unity). All three are sampled
+     * in OUTPUT frames.
+     *
+     * The ride is written as [RIDE_POINTS] breakpoints that are exact in dB, with linear interpolation in
+     * between (< 0.05 dB of error at the cap), because a lane segment interpolates gains, not decibels.
      */
-    private fun lanes(geo: Geometry): Triple<Lane, Lane, Lane> {
+    private fun lanes(geo: Geometry, makeupDb: Double): Triple<Lane, Lane, Lane> {
         val cut = geo.cutOut.toLong()
         val dry = Lane(LANE_DRY).add(0L, 1.0).add(cut, 1.0, FadeLaw.LINEAR).add(cut + CUT_FADE_FRAMES, 0.0)
         val wetStart = (cut - geo.wetRamp).coerceAtLeast(Splice.GUARD_FRAMES.toLong())
         val release = (geo.tail / 4).coerceAtLeast(1)
         val level = geo.wetLevel
+        val releaseStart = cut + geo.tail - release
+        val enter = geo.bEnterOut.toLong()
         val wet = Lane(LANE_WET)
             .add(wetStart, 0.0, FadeLaw.EQUAL_POWER)
             .add(cut, level)
-            .add(cut + geo.tail - release, level, FadeLaw.EXP)
-            .add(cut + geo.tail, 0.0)
+        // The ride only exists when there is a gap to carry and room to release it again before the tail ends.
+        val rideDown = minOf(enter + Math.round(geo.beatFramesA * 4), releaseStart)
+        if (makeupDb > 0.0 && enter > cut && rideDown > enter) {
+            for (k in 1..RIDE_POINTS) {
+                val u = k.toDouble() / RIDE_POINTS
+                wet.add(cut + Math.round((enter - cut) * u), level * Curves.dbToLinear(makeupDb * u))
+            }
+            for (k in 1 until RIDE_POINTS) {
+                val u = k.toDouble() / RIDE_POINTS
+                wet.add(enter + Math.round((rideDown - enter) * u), level * Curves.dbToLinear(makeupDb * (1.0 - u)))
+            }
+            wet.add(rideDown, level)
+        }
+        wet.add(releaseStart, level, FadeLaw.EXP).add(cut + geo.tail, 0.0)
         val b = Lane(LANE_B).add(geo.bEnterOut.toLong(), 0.0, FadeLaw.EQUAL_POWER).add((geo.bEnterOut + B_FADE_FRAMES).toLong(), 1.0)
         return Triple(dry, wet, b)
     }
 
+    /**
+     * The decay the tail is predicted to have between the cut and B's entry, from `feedback` alone
+     * (`feedback^(gap / delay)`). [plan] has no audio to measure, so this is what its published lane assumes;
+     * the loop filters make the real decay faster, which is what [render] corrects.
+     */
+    private fun predictedMakeupDb(geo: Geometry, p: Params): Double {
+        val gap = geo.bEnterOut - geo.cutOut
+        if (gap <= 0 || geo.delayFrames <= 0) return 0.0
+        val repeats = gap.toDouble() / geo.delayFrames
+        val naturalDb = 20.0 * log10(p.double(P.feedback).coerceIn(0.01, 0.999)) * repeats
+        return (p.double(P.tailAtEntryDb) - naturalDb).coerceIn(0.0, MAX_TAIL_MAKEUP_DB)
+    }
+
+    /**
+     * The decay the rendered tail actually has between the cut and B's entry, in dB: the RMS of the first delay
+     * period after the cut against the RMS of the delay period that ends at B's downbeat. 0 when either window
+     * is empty or silent (nothing to ride).
+     */
+    private fun measuredTailDecayDb(echo: AudioBuffer, geo: Geometry): Double {
+        val d = geo.delayFrames
+        val first = rms(echo, geo.cutOut, geo.cutOut + d)
+        val atEntry = rms(echo, geo.bEnterOut - d, geo.bEnterOut)
+        if (first <= 0.0 || atEntry <= 0.0) return 0.0
+        return 20.0 * log10(atEntry / first)
+    }
+
+    /** RMS of `[from, to)` over every channel (0 for an empty or out-of-range span). */
+    private fun rms(buffer: AudioBuffer, from: Int, to: Int): Double {
+        val lo = from.coerceIn(0, buffer.frames)
+        val hi = to.coerceIn(lo, buffer.frames)
+        if (hi <= lo) return 0.0
+        var acc = 0.0
+        for (c in 0 until buffer.channelCount) {
+            val x = buffer[c]
+            for (i in lo until hi) acc += x[i].toDouble() * x[i]
+        }
+        return Math.sqrt(acc / ((hi - lo) * buffer.channelCount))
+    }
+
     /** One point per A beat inside the segment: `value` is A's absolute beat index, `outputSec` where it lands. */
-    private fun masterBeatLane(a: TrackAnalysis, geo: Geometry, sr: Int): AutomationLane {
+    private fun beatsALane(a: TrackAnalysis, geo: Geometry, sr: Int): AutomationLane {
         val points = ArrayList<LanePoint>()
         if (!a.grid.isEmpty) {
             val scaleA = sr / a.sampleRate.toDouble()
@@ -361,7 +463,7 @@ class EchoOutStrategy : TransitionStrategy {
                 beat++
             }
         }
-        return AutomationLane(LANE_MASTER_BEAT, points)
+        return AutomationLane(LANE_BEATS_A, points)
     }
 
     companion object {
@@ -373,7 +475,15 @@ class EchoOutStrategy : TransitionStrategy {
         const val LANE_DRY = "gainA"
         const val LANE_WET = "echoTail"
         const val LANE_B = "gainB"
-        const val LANE_MASTER_BEAT = "masterBeat"
+                /**
+         * Informational lane: one point per beat of **A's own grid** inside the segment, for the Lab's ruler.
+         *
+         * It is deliberately not called `masterBeat`. This strategy is not beat-domain - no deck is slaved to a
+         * [dev.muisc.transitions.core.MasterGrid], B is never stretched - so there is no grid that the whole
+         * render is supposed to land on, and `ArtifactMetrics.beatAlignment*` (which asks exactly that question)
+         * must not be computed for it.
+         */
+        const val LANE_BEATS_A = "beatsA"
 
         /** High-pass inside the feedback loop: keeps A's sub out of the tail so it never fights B's kick. */
         const val LOOP_HIGH_PASS_HZ = 120.0
@@ -386,6 +496,17 @@ class EchoOutStrategy : TransitionStrategy {
 
         /** 5 ms equal-power declick on B's entry. */
         private const val B_FADE_FRAMES = 220
+
+        /**
+         * Ceiling on the echo return's ride. Eighteen decibels is roughly three repeats' worth of feedback at
+         * the default 0.72: enough to carry a bar-long gap on material the loop filters eat, and low enough that
+         * a tail which has genuinely died (an outro that ends in silence, so there is nothing to echo) is not
+         * amplified into its own noise floor.
+         */
+        const val MAX_TAIL_MAKEUP_DB = 18.0
+
+        /** Breakpoints used to write each half of the ride (dB-exact points, linear gain in between). */
+        private const val RIDE_POINTS = 16
 
         private const val MIN_B_OFFSET = 2048
         private const val MAX_ECHOES = 64
