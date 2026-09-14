@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.Tag
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -48,6 +49,7 @@ import dev.muisc.app.ui.viewmodel.AppViewModelFactory
 import dev.muisc.app.ui.viewmodel.LibraryViewModel
 import dev.muisc.transitions.PlaybackContext
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(navigator: MuiscNavigator) {
     val vm: LibraryViewModel = viewModel(factory = AppViewModelFactory)

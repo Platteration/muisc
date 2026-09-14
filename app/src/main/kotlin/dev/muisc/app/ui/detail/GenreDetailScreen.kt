@@ -1,5 +1,6 @@
 package dev.muisc.app.ui.detail
 
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -13,6 +14,7 @@ import dev.muisc.app.ui.viewmodel.LibraryViewModel
 import dev.muisc.transitions.PlaybackContext
 
 /** Songs of a genre. Play in order → QUEUE (transitions on); shuffle → SHUFFLE. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GenreDetailScreen(genreId: Long, navigator: MuiscNavigator) {
     val vm: LibraryViewModel = viewModel(factory = AppViewModelFactory)

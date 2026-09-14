@@ -204,7 +204,12 @@ class EngineControllerImpl(
     override fun play() {
         if (released) return
         if (queue.current() == null) return
-        requestFocus()
+        // Audio focus is a precondition, not a formality: a phone call or a navigation prompt owning the output
+        // means we must not open the sink at all (DESIGN §8). The user sees why nothing started.
+        if (!requestFocus()) {
+            reportError("Another app is using the audio output")
+            return
+        }
         focus.playing = true
         _state.update { it.copy(error = null, isPlaying = true) }
         player.submit(EngineCommand.Play)
@@ -780,8 +785,7 @@ class EngineControllerImpl(
     private fun abandonFocus() = focus.abandon()
 
     companion object {
-        /** Ducking depth when another app asks for transient focus that may duck (DESIGN §8). */
-        const val DUCK_DB = -12f
+        // Ducking depth lives with the thing that decides to duck: AudioFocusHandler.DUCK_DB (DESIGN §8).
 
         /** "Previous" restarts the track instead of stepping back after this much of it has played. */
         const val RESTART_THRESHOLD_MS = 3_000L

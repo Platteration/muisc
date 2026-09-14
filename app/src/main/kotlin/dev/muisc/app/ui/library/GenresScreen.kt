@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Tag
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.Scaffold
@@ -25,6 +26,7 @@ import dev.muisc.app.ui.components.EmptyState
 import dev.muisc.app.ui.viewmodel.AppViewModelFactory
 import dev.muisc.app.ui.viewmodel.LibraryViewModel
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GenresScreen(navigator: MuiscNavigator) {
     val vm: LibraryViewModel = viewModel(factory = AppViewModelFactory)

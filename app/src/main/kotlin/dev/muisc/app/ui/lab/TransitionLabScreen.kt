@@ -31,6 +31,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -85,6 +86,7 @@ import dev.muisc.transitions.RenderReport
 
 private enum class Deck { A, B }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TransitionLabScreen(initialA: Long, initialB: Long, navigator: MuiscNavigator) {
     val vm: LabViewModel = viewModel(factory = AppViewModelFactory)

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.DragHandle
 import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +59,7 @@ import dev.muisc.app.ui.viewmodel.PlayerViewModel
  * The play queue: tap to skip, swipe left to remove, long-press + drag (handle or row) to reorder. Under each
  * item the badge for edge `i` (transition from item i to i+1) mirrors the coordinator's state.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun QueueScreen(navigator: MuiscNavigator) {
     val vm: PlayerViewModel = viewModel(factory = AppViewModelFactory)
@@ -137,6 +139,7 @@ fun QueueScreen(navigator: MuiscNavigator) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QueueItem(
     index: Int,

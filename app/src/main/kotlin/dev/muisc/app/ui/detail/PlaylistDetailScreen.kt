@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
@@ -41,6 +42,7 @@ import dev.muisc.app.ui.viewmodel.LibraryViewModel
 import dev.muisc.transitions.PlaybackContext
 
 /** A user playlist: play → PLAYLIST context; per-row "remove from playlist"; rename/delete in the overflow menu. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaylistDetailScreen(playlistId: Long, navigator: MuiscNavigator) {
     val vm: LibraryViewModel = viewModel(factory = AppViewModelFactory)
@@ -102,6 +104,7 @@ fun PlaylistDetailScreen(playlistId: Long, navigator: MuiscNavigator) {
 }
 
 /** Smart playlists: recently added / most played / history. Play → PLAYLIST context. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SmartPlaylistScreen(kind: String, navigator: MuiscNavigator) {
     val vm: LibraryViewModel = viewModel(factory = AppViewModelFactory)
