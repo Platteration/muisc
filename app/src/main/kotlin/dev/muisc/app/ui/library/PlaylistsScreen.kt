@@ -16,6 +16,7 @@ import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.TrendingUp
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,6 +43,7 @@ import dev.muisc.app.ui.components.SectionHeader
 import dev.muisc.app.ui.viewmodel.AppViewModelFactory
 import dev.muisc.app.ui.viewmodel.LibraryViewModel
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PlaylistsScreen(navigator: MuiscNavigator) {
     val vm: LibraryViewModel = viewModel(factory = AppViewModelFactory)

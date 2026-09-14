@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -18,7 +19,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -32,28 +32,24 @@ import dev.muisc.app.ui.components.EmptyState
 import dev.muisc.app.ui.components.SongRow
 import dev.muisc.app.ui.viewmodel.AppViewModelFactory
 import dev.muisc.app.ui.viewmodel.LibraryViewModel
-import dev.muisc.app.ui.viewmodel.find
 import dev.muisc.transitions.PlaybackContext
 
 /** Folder tree built from song paths. Navigates within the tree; system back walks up until the root. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FoldersScreen(navigator: MuiscNavigator) {
     val vm: LibraryViewModel = viewModel(factory = AppViewModelFactory)
     val tree by vm.folderTree.collectAsStateWithLifecycle()
     var currentPath by rememberSaveable { mutableStateOf("") }
 
-    // Collapse single-child chains from the root (e.g. /storage/emulated/0) so the first screen is useful.
-    val effectiveRoot = remember(tree) {
-        var node = tree
-        while (node.songs.isEmpty() && node.children.size == 1) node = node.children.first()
-        node
-    }
-    val node = if (currentPath.isEmpty()) effectiveRoot else (tree.find(currentPath) ?: effectiveRoot)
-    val atRoot = node === effectiveRoot
+    // `FolderTree.build` already collapses single-child, song-less chains (e.g. /storage/emulated/0), so the tree's
+    // own root is the first useful folder and no extra walk-down is needed here.
+    val node = if (currentPath.isEmpty()) tree else (tree.find(currentPath) ?: tree)
+    val atRoot = node === tree
 
     BackHandler(enabled = !atRoot) {
         currentPath = node.path.substringBeforeLast('/', "")
-        if (currentPath.length <= effectiveRoot.path.length) currentPath = ""
+        if (currentPath.length <= tree.path.length) currentPath = ""
     }
 
     Scaffold(
@@ -65,7 +61,7 @@ fun FoldersScreen(navigator: MuiscNavigator) {
             )
         },
     ) { padding ->
-        if (node.children.isEmpty() && node.songs.isEmpty()) {
+        if (node.children.isEmpty() && node.items.isEmpty()) {
             EmptyState(title = stringResource(R.string.empty_generic), modifier = Modifier.padding(padding))
             return@Scaffold
         }
@@ -86,27 +82,27 @@ fun FoldersScreen(navigator: MuiscNavigator) {
                         )
                     }
                 }
-                if (node.songs.isNotEmpty()) {
+                if (node.items.isNotEmpty()) {
                     item {
                         PlayShuffleHeader(
-                            songs = node.songs,
-                            onPlay = { vm.play(node.songs, 0, PlaybackContext.QUEUE) },
-                            onShuffle = { vm.shuffle(node.allSongs()) },
+                            songs = node.items,
+                            onPlay = { vm.play(node.items, 0, PlaybackContext.QUEUE) },
+                            onShuffle = { vm.shuffle(node.allItems) },
                         )
                     }
                 }
                 items(node.children, key = { "d:" + it.path }) { child ->
                     ListItem(
                         headlineContent = { Text(child.name) },
-                        supportingContent = { Text(stringResource(R.string.songs_count, child.totalSongs)) },
+                        supportingContent = { Text(stringResource(R.string.songs_count, child.totalCount)) },
                         leadingContent = { Icon(Icons.Rounded.Folder, contentDescription = null) },
                         modifier = Modifier.clickable { currentPath = child.path },
                     )
                 }
-                itemsIndexed(node.songs, key = { _, s -> "s:" + s.id }) { index, song ->
+                itemsIndexed(node.items, key = { _, s -> "s:" + s.id }) { index, song ->
                     SongRow(
                         song = song,
-                        onClick = { vm.play(node.songs, index, PlaybackContext.QUEUE) },
+                        onClick = { vm.play(node.items, index, PlaybackContext.QUEUE) },
                         onAction = { onAction(song, it) },
                     )
                 }

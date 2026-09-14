@@ -1,51 +1,229 @@
-# Android app: build notes and local verification checklist
+# Android app: build notes and first-build checklist
 
-The `:app` module was written without an Android SDK on the authoring machine (Google's Maven host was unreachable),
-so it has not been compiled yet. The engine modules it depends on are fully built and tested. Expect a short
-fix-up pass the first time you open the project in Android Studio. This file collects what the authors flagged as
-worth checking, grouped by work package.
+The `:app` module was written on a machine with no Android SDK (`dl.google.com` unreachable), by four
+agents working in parallel and without sight of each other. It has therefore **never been compiled by
+the Android toolchain**. What it *has* been through is a full offline type-check against the real,
+tested engine classes plus a hand-written stub set for the platform APIs — see
+[`app/src/typecheck-stubs/README.md`](../app/src/typecheck-stubs/README.md) for exactly what that
+does and does not cover.
 
-## How to build
+This file is the single checklist for the first real build. §1 says what is already known-good, §2
+lists what the type-check fixed, §3 is what still has to be checked on an SDK, §4 is the set of real
+gaps found by reading the code that no compiler will tell you about.
 
-1. Install Android Studio (Ladybug or newer) with SDK Platform 35 and build-tools.
-2. Create `local.properties` with `sdk.dir=/path/to/Android/sdk` (or export `ANDROID_HOME`). `settings.gradle.kts`
-   includes `:app` only when an SDK directory is found, so engine-only builds keep working without one.
+---
+
+## 0. How to build
+
+1. Android Studio (Ladybug or newer) with SDK Platform 35 + build-tools.
+2. `local.properties` with `sdk.dir=/path/to/Android/sdk`, or `ANDROID_HOME` in the environment.
+   `settings.gradle.kts` includes `:app` **only** when it finds one, so engine-only builds keep
+   working without an SDK (and never touch `dl.google.com`).
 3. `./gradlew :app:assembleDebug`.
 
-## Data layer + DI (Room, MediaStore scanner, DataStore, AppGraph)
+To re-run the offline type-check (no SDK needed):
 
-Files: `MuiscApplication.kt`, `di/AppGraph.kt`, `di/PlaybackBridge.kt`, `data/db/Entities.kt`, `data/db/Daos.kt`, `data/db/MuiscDatabase.kt`, `data/db/Converters.kt`, `data/LibraryRepository.kt`, `data/MediaStoreScanner.kt`, `data/ArtworkLoader.kt`, `data/FolderTree.kt`, `data/RoomAnalysisCache.kt`, `data/prefs/SettingsRepository.kt`, `playback/NoOpEngineController.kt`, `playback/NoOpTransitionLab.kt`, `app/src/main/res/drawable/ic_album_placeholder.xml`, `app/src/test/kotlin/dev/muisc/app/data/FolderTreeTest.kt`
+```
+./gradlew :engine:player:compileKotlin   # once, to build the engine classes + populate the cache
+app/typecheck.sh                         # non-UI packages + unit tests  -> must be clean
+app/typecheck.sh ui                      # everything                    -> currently clean too
+```
 
-### Verify when compiling locally
+---
 
-VERIFIED HERE (real Kotlin 2.1.20 compiler, no Gradle): FolderTree.kt + FolderTreeTest.kt compile and all 8 tests pass; Entities/Converters/Daos/MuiscDatabase/LibraryRepository/RoomAnalysisCache/NoOpEngineController/NoOpTransitionLab/PlaybackBridge + the frozen EngineController/TransitionLabApi type-check against the compiled engine classes using stub androidx.room annotations (validates imports, nullability, suspend usage, interface conformance — NOT Room's SQL validation).
+## 1. What the type-check proves today
 
-VERIFY WHEN COMPILING LOCALLY:
-1. app/build.gradle.kts has no `tasks.withType<Test> { useJUnitPlatform() }`; FolderTreeTest uses kotlin.test (resolves to JUnit 5 via junit-jupiter). Add `tasks.withType<Test>().configureEach { useJUnitPlatform() }` to app/build.gradle.kts or the test will be silently skipped by the JUnit 4 runner.
-2. Room KSP query validation: the JOIN queries in Daos.kt (SongDao.ofGenre, mostPlayed, recentlyPlayed, PlaylistDao.songsOf) use `songs.*` with an aliased subquery; SongDao.markAnalysedBySourceBlocking is a non-suspend UPDATE returning Int; AnalysisDao methods are deliberately blocking (non-suspend). If Room complains about an unused Converters class, that is a warning only.
-3. Room composite key on TrackAnalysisEntity (fingerprint, sampleRate, version) instead of fingerprint-only PK — intentional (matches AnalysisCache.get signature); adjust if the playback package expected fingerprint-only.
-4. MediaStore constants gated by API: `MediaStore.Audio.Media.ALBUM_ARTIST` and `.GENRE` (API 30), `.RELATIVE_PATH` (API 29) are added to the projection only under Build.VERSION checks; `MediaStore.getGeneration(context, MediaStore.VOLUME_EXTERNAL_PRIMARY)` is gated at R. Lint may still emit InlinedApi warnings for the getColumnIndex(...) lines — safe. `@Suppress("DEPRECATION")` covers DATA.
-5. Coil 2.7 calls in ArtworkLoader: ImageRequest.Builder.size(Int), memoryCacheKey(String), fallback(Int), context.imageLoader (import coil.imageLoader), ImageResult.drawable. MuiscApplication implements coil.ImageLoaderFactory.
-6. DataStore: top-level `private val Context.settingsDataStore by preferencesDataStore(name = "muisc_settings")`; stringSetPreferencesKey for the blacklist. TransitionPrefs is serialised with `TransitionPrefs.serializer()` (needs the engine's serialization plugin, already applied).
-7. AppGraph.startPlaybackService uses `Intent().setClassName(context, "dev.muisc.app.playback.PlaybackService")` + plain startService (wrapped in try/catch); the future PlaybackService must call AppGraph.installPlayback(controller, lab) in onCreate and AppGraph.uninstallPlayback(controller, lab) in onDestroy, and promote itself to foreground when playback starts.
-8. DelegatingEngineController uses flatMapLatest (@OptIn(ExperimentalCoroutinesApi::class) on the class) — if the app enables -Werror for opt-ins, keep the annotation.
-9. Room schema export: `room.schemaLocation` is set, so the first build writes app/schemas/dev.muisc.app.data.db.MuiscDatabase/1.json — commit it.
-10. LibraryRepository.search returns Flow<SearchResults> (songs+albums+artists+playlists), not Flow<List<Song>>; the UI package should use `.songs` etc.
-11. Song.genre join: songs are linked to Genre by name (Genre.id = MediaStoreScanner.genreId(name), a stable hash), so the UI's genre/{id} route works with Genre.id from LibraryRepository.genres().
-12. No backup_rules.xml / data_extraction_rules.xml were written (manifest untouched, nothing references them).
+Both modes are **clean — zero errors, zero warnings** over all 79 Kotlin files in
+`app/src/main/kotlin` and `app/src/test/kotlin`.
 
-### Author notes
+* Every use of the engine API is type-correct against the **real compiled engine classes**
+  (`dev.muisc.player`, `dev.muisc.transitions`, `dev.muisc.analysis`, `dev.muisc.audio`,
+  `dev.muisc.metrics`, `dev.muisc.dsp`): names, arities, argument/return types, nullability,
+  `suspend`-ness, every `override`, every abstract member.
+* The four packages agree with each other. `PlaybackService` ↔ `EngineGraph` ↔ `EngineControllerImpl`
+  ↔ `QueueManager` ↔ `AndroidAnalysisService` ↔ `TransitionLabImpl`, and `ui/**` ↔ `di/AppGraph` ↔
+  `data/**`, all resolve. The two frozen contracts (`playback/EngineController.kt`,
+  `playback/TransitionLabApi.kt`) are implemented in full by `EngineControllerImpl`,
+  `NoOpEngineController`, `DelegatingEngineController`, `TransitionLabImpl`, `NoOpTransitionLab` and
+  `DelegatingTransitionLab`.
+* Every `R.string` / `R.drawable` / `R.plurals` / `R.color` / `R.style` reference resolves against a
+  name that really exists in `app/src/main/res` (the harness generates `R` from the resource files).
+* The app's own unit tests compile **and pass**: 18 tests in `FolderTreeTest` and
+  `GaplessTagParserTest`, run on the JUnit 5 platform against the same classes.
+* Kotlin opt-in propagation is real for the Compose markers, which is how §2's biggest batch of
+  errors was found.
 
-Design notes: (a) AppGraph.engineController and AppGraph.lab are process-stable delegating instances (di/PlaybackBridge.kt) — the UI can collect engineController.state once; when PlaybackService installs the real controller, the flow switches and any commands issued earlier (e.g. setQueue from a tap before the service bound) are replayed in order (bounded buffer of 32) after the service is started by class name. (b) Scanner: incremental scans re-read only rows with DATE_MODIFIED > last scan, reconcile deletions via an id-only query, apply the blacklist to stored rows too, and rebuild album/artist/genre aggregates in Kotlin inside one Room transaction (skipped when nothing changed); on API 30+ an unchanged MediaStore generation short-circuits the scan. Genres on API < 30 come from MediaStore.Audio.Genres.Members; on 30+ from the GENRE column. (c) MuiscApplication starts an incremental scan if permission is already granted, rescans (debounced 1.5 s) on MediaStore changes and does a full rescan when minDurationSec/blacklist change; the UI must call AppGraph.requestScan() right after the permission is first granted. (d) RoomAnalysisCache keeps a 64-entry LRU in front of Room and flips Song.hasAnalysis by matching the analysis sourceId to Song.uri or Song.path — the playback layer should pass the song's content URI (Song.uri) as sourceId for the indicator to work. (e) Extra helpers beyond the spec (songsOfFolder, moveInPlaylist, playlistSongCount, recordPlay, albumsOfArtist, scanStatus) are additive. Scratchpad contains the stub-based type-check script (typecheck.sh) and the FolderTree test runner (compile.sh) if you want to re-run them.
+Not proven: Room's SQL, Compose semantics, resource contents, the manifest, lint, KSP, R8, and the
+fidelity of the stub signatures themselves. Those are §3.
 
-## Compose UI (navigation, theme, library, now playing, queue, lab, settings)
+---
 
-Files: `MainActivity.kt`, `ui/MuiscApp.kt`, `ui/Navigation.kt`, `ui/theme/Theme.kt`, `ui/theme/Color.kt`, `ui/components/AlbumCard.kt`, `ui/components/ArtistRow.kt`, `ui/components/ArtworkImage.kt`, `ui/components/EdgeBadge.kt`, `ui/components/EmptyState.kt`, `ui/components/Formatters.kt`, `ui/components/MiniPlayer.kt`, `ui/components/PermissionGate.kt`, `ui/components/PlaylistDialogs.kt`, `ui/components/SectionHeader.kt`, `ui/components/SongRow.kt`, `ui/components/SortMenu.kt`, `ui/library/HomeScreen.kt`, `ui/library/SongsScreen.kt`, `ui/library/AlbumsScreen.kt`, `ui/library/ArtistsScreen.kt`, `ui/library/PlaylistsScreen.kt`, `ui/library/GenresScreen.kt`, `ui/library/FoldersScreen.kt`, `ui/library/SearchScreen.kt`, `ui/library/SongActions.kt`, `ui/detail/AlbumDetailScreen.kt`, `ui/detail/ArtistDetailScreen.kt`, `ui/detail/PlaylistDetailScreen.kt`, `ui/detail/GenreDetailScreen.kt`, `ui/nowplaying/NowPlayingScreen.kt`, `ui/nowplaying/WaveformStrip.kt`, `ui/queue/QueueScreen.kt`, `ui/queue/ReorderHelper.kt`, `ui/lab/TransitionLabScreen.kt`, `ui/lab/ParamEditor.kt`, `ui/settings/SettingsScreen.kt`, `ui/viewmodel/AppViewModelFactory.kt`, `ui/viewmodel/LibraryViewModel.kt`, `ui/viewmodel/PlayerViewModel.kt`, `ui/viewmodel/SettingsViewModel.kt`, `ui/viewmodel/LabViewModel.kt`, `app/src/main/res/values/strings.xml`
+## 2. Previously-flagged items now resolved
 
-### Verify when compiling locally
+From the four agents' own hand-over notes:
 
-1. MainActivity imports com.google.common.util.concurrent.ListenableFuture: relies on media3-session exposing guava transitively (it is in Media3's public API); if unresolved, add implementation("com.google.guava:guava") or drop the MediaController connect block (AppGraph's delegating controller already starts the service on first command). 2. ParamEditor uses Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable, true) — the material3 1.3.x signature (BOM 2025.01.01); if the resolved material3 is older, use the deprecated no-arg menuAnchor(). 3. Material icons used from material-icons-extended (Rounded: Science, SwapVert, SwapHoriz, PushPin, Palette, Tune, TrendingUp, NewReleases, DeleteSweep, GraphicEq, DragHandle, LibraryMusic, Tag, History, HourglassTop, Bolt, Block, HelpOutline, Sort, QueueMusic); Sort/QueueMusic/HelpOutline are deprecated in favour of AutoMirrored (warnings only). 4. ColorScheme.copy(surfaceContainer*...) in Theme.kt needs material3 >= 1.2 (fine with the pinned BOM). 5. Compose warnings expected, not errors: composable Modifier extension (reorderHandle), deprecated icons. 6. LibraryViewModel.searchResults returns MutableStateFlow in one branch of flatMapLatest — should infer Flow<SearchResults>; if inference complains, wrap with flowOf(SearchResults()). 7. SettingsViewModel.updateTransition writes via settings.update(next) then engineController.updateTransitionPrefs(next); the repo also offers updateTransition(transform) if you prefer atomic edits. 8. PermissionGate requests READ_MEDIA_AUDIO (33+) / READ_EXTERNAL_STORAGE; POST_NOTIFICATIONS is left to the playback package. 9. The app-side sort is client-side (ui.components.SongSort) and repo.songs() is called with its default — intentional; data.SongSort is unused by the UI. 10. Palette extraction in NowPlayingScreen uses coil.imageLoader + ImageRequest.size(200).allowHardware(false); verify the coil.imageLoader extension resolves (coil-compose 2.7 pulls coil-base). 11. Album detail derives the year via takeIf on Int (Album.year and Song.year are both Int in the sibling's entities). 12. Queue reorder: optimistic local copy + controller.moveQueueItem; if the engine re-emits a different order mid-drag the list re-syncs on drag end.
+| Flagged | Status |
+| --- | --- |
+| `app/build.gradle.kts` may lack `useJUnitPlatform()`, silently skipping `FolderTreeTest` | **Resolved.** The line is present; the 18 tests were executed and pass. |
+| `PlaybackService` must call `AppGraph.installPlayback` / `uninstallPlayback` | **Resolved.** `onCreate` installs, `onDestroy` uninstalls and releases. |
+| `EngineControllerImpl` was constructed with a two-argument constructor that does not exist; two competing `AudioFocusHandler`s; a reflective shim for ducking | **Resolved** (commit "Wire the Android playback packages together at their integration seams"): the service builds the engine through `EngineGraph.create`, audio focus has one owner, and the controller implements `DuckableEngine` directly. |
+| `MainActivity` imports `com.google.common.util.concurrent.ListenableFuture` | Type-checks. `MediaController.Builder.buildAsync()` really returns one and media3-session exposes Guava as `api`, so no extra dependency should be needed — but this is the one place the app depends on a transitive artifact, so confirm it resolves (§3). |
+| `LibraryViewModel.searchResults` inference through `flatMapLatest` | **Resolved** — infers correctly, no `flowOf` wrapper needed. |
+| `DelegatingEngineController` needs `@OptIn(ExperimentalCoroutinesApi::class)` for `flatMapLatest` | **Resolved** — present, and now actually enforced by the checker. |
+| `Album.year` / `Song.year` are `Int`, album detail's `takeIf` | **Resolved.** |
+| `SettingsRepository.updateUi(transform)` / `UiPrefs` field types / `AppGraph.requestScan`/`scanStatus` / `Song.albumArtist` nullable — names the UI consumed from the sibling package | **Resolved**, all resolve. |
+| `TrackAnalysisEntity` composite key `(fingerprint, sampleRate, version)` vs a fingerprint-only PK | **Resolved by construction** — it matches `AnalysisCache.get(fingerprint, sampleRate, version)`, which `RoomAnalysisCache` implements against the real engine interface. |
+| `NowPlayingScreen` Palette extraction via `coil.imageLoader` + `ImageRequest.size(200).allowHardware(false)` | Type-checks against Coil 2.7 signatures; still version-sensitive (§3). |
 
-### Author notes
+### Defects the type-check itself found and fixed
 
-All 43 files were written blind (no Android SDK here) with mainstream Compose M3 / lifecycle 2.8 / navigation 2.8 / Media3 1.5 / Coil 2.7 APIs and a self-review pass (imports, nullability, smart casts, coroutine usage, remember/collectAsStateWithLifecycle). Mid-task I found the concurrent package's real files in its worktree and aligned every consumed name to them (repo.songs() default, songById, SettingsRepository.updateUi(transform), UiPrefs field types, AppGraph.requestScan/scanStatus, Song.albumArtist nullable). Design highlights: bottom nav (Home/Songs/Albums/Artists/Playlists) + persistent MiniPlayer above it that opens Now Playing; album "Play in order" → PlaybackContext.ALBUM with a tooltip explaining no DJ transitions, Shuffle → SHUFFLE, playlists/smart lists → PLAYLIST, other lists → QUEUE, play-next/add-to-queue via controller.playNext/addToQueue; Now Playing has five layouts (Normal/Card/Blur/Adaptive via Palette/Minimal), WaveformStrip drawing beat/downbeat/phrase ticks from a cached BeatGrid, a "Next transition" EdgeBadge (Gated/Analysing/Planned+score/Rendering+progress/Ready/Live/Failed) that opens the Lab for the current pair, and a transition-in-progress banner; Queue supports tap-to-skip, swipe-to-remove (SwipeToDismissBox) and long-press drag reorder via a small ReorderState helper, with a per-edge badge; Transition Lab picks A/B (defaults current+next, or ?a=&b= route args), shows analyses (BPM, key/Camelot, LUFS, intro/outro), pair features, ranked candidates with scores/reasons, a ParamSpec-driven ParamEditor (slider/stepped slider/switch/exposed dropdown), render with staged progress, a Canvas lane/marker plot with audition cursor, report/metric/warning chips, audition play/stop, thumbs up/down, pin-for-pair and export; Settings covers Look/Audio/Transitions (incl. per-strategy weight sliders and enable switches for the 14 frozen ids)/Library (min duration, blacklist add/remove, rescan, analyse-only-while-charging)/About. Engine files were not touched, so Gradle was not run.
+1. **14 missing `@OptIn(ExperimentalMaterial3Api::class)` call sites** — hard compile errors on a real
+   build. `LibraryTopBar` exposes `scrollBehavior: TopAppBarScrollBehavior?` in its signature, and
+   `TopAppBarScrollBehavior` is `@ExperimentalMaterial3Api` in material3 1.3.x, so **every screen that
+   calls it** needs the opt-in: `HomeScreen`, `SongsScreen`, `AlbumsScreen`, `ArtistsScreen`,
+   `GenresScreen`, `PlaylistsScreen`, `FoldersScreen`, `ArtistDetailScreen`, `GenreDetailScreen`,
+   `PlaylistDetailScreen` (both screens), `TransitionLabScreen`, `SettingsScreen`, `QueueScreen`. On
+   top of that `QueueScreen.QueueItem` uses `SwipeToDismissBox` / `rememberSwipeToDismissBoxState`,
+   also experimental. All fixed with a per-function `@OptIn`, matching the style already used in
+   `SongActions`, `SearchScreen`, `AlbumDetailScreen` and `ParamEditor`.
+   *This class of error is now checked*: the stub markers carry `@RequiresOptIn`, so a future missing
+   opt-in fails `app/typecheck.sh`.
+2. **`EngineControllerImpl.play()` ignored the audio-focus result.** Both its own KDoc and
+   `AudioFocusHandler.request()` ("Returns false when the request was denied — do not start playing")
+   promised that playback only starts with focus; the return value was discarded, so the app would
+   have opened the sink over an active phone call. It now reports an error and stays paused.
+3. **Duplicate `DUCK_DB` constant** in `EngineControllerImpl`'s companion, unused and shadowing the
+   one in `AudioFocusHandler` that actually drives ducking. Removed.
+4. **Two folder-tree implementations.** `ui/viewmodel/LibraryViewModel.kt` declared its own
+   `FolderNode` + `buildFolderTree` + `find`, and `FoldersScreen` re-implemented root-chain collapsing
+   by hand — while `data/FolderTree.kt` (generic, unit-tested, collapses chains at *every* level) and
+   `LibraryRepository.folders()` sat unused. The UI copy is gone; `LibraryViewModel.folderTree` is now
+   `repo.folders()` and `FoldersScreen` uses `FolderNode<Song>` (`items` / `allItems` / `totalCount`).
+   Folder names now collapse everywhere, not just at the root.
+5. **"Analyse only while charging" did nothing until the next cold start.** The periodic
+   `AnalysisWorker` is enqueued once, by `EngineGraph.create`, with the value read at that moment;
+   flipping the switch in Settings never re-enqueued it. `MuiscApplication` now observes the pref and
+   re-enqueues (`ExistingPeriodicWorkPolicy.UPDATE` rewrites the standing job's constraints in place).
+
+Stub-side fixes made while doing this: `MediaController` / `SessionToken` were missing entirely (so
+`MainActivity` never resolved), `ListenableFuture` did not extend `java.util.concurrent.Future` (so
+`addListener` / `get` / `releaseFuture(Future<out MediaController>)` did not check), and the Compose
+experimental markers were plain annotations.
+
+---
+
+## 3. Still to check on a real Android SDK
+
+Ordered by how likely they are to stop the first build.
+
+1. **Room 2.6.1 against KSP 2.1.20-1.0.32.** The catalogue pins Room 2.6.1 while KSP is on the
+   Kotlin 2.1.20 line, where KSP2 is the default; Room's processor only gained KSP2 support in the
+   2.7 line. If `:app:kspDebugKotlin` fails with a KSP/Room internal error, the fix is either
+   `ksp.useKSP2=false` in `gradle.properties` or bumping `room = "2.7.x"` (the only source change that
+   needs is `fallbackToDestructiveMigration()` → `fallbackToDestructiveMigration(dropAllTables = true)`
+   in `MuiscDatabase.build`, the no-arg form being deprecated there). Not changed here because it
+   cannot be verified offline.
+2. **Room's SQL validation — the whole of `data/db/Daos.kt` is unverified.** Nothing in the offline
+   pass parses a `@Query`. Watch in particular: the aliased-subquery joins in `SongDao.mostPlayed` /
+   `recentlyPlayed`, the `songs.genre = genres.name` join in `SongDao.ofGenre`, the
+   `playlist_entries` join in `PlaylistDao.songsOf`, the non-suspend `UPDATE … RETURNING Int` in
+   `SongDao.markAnalysedBySourceBlocking`, the deliberately blocking `AnalysisDao` methods, and
+   `PlaylistDao.maxPosition(): Int?` (`SELECT MAX(...)` over an empty table). An "unused Converters
+   class" complaint is a warning, not an error.
+3. **Room schema export.** `room.schemaLocation` is set, so the first build writes
+   `app/schemas/dev.muisc.app.data.db.MuiscDatabase/1.json`. Commit it.
+4. **Compose compilation proper.** `ui/**` was checked without the Compose compiler plugin, so
+   composable-calling-context, `remember`/state inference, `Modifier` chain generics and stability are
+   all unverified. Expect the first `:app:compileDebugKotlin` to surface Compose-only errors in the
+   screens, particularly `NowPlayingScreen`, `TransitionLabScreen` and `WaveformStrip`/`Canvas`, and
+   `ui/queue/ReorderHelper.kt`, which declares a `@Composable` `Modifier` extension.
+5. **Library versions vs assumed signatures.** The stubs were written for material3 1.3.x (BOM
+   2025.01.01), lifecycle 2.8.7, navigation 2.8.5, Media3 1.5.1, Coil 2.7, DataStore 1.1.2, WorkManager
+   2.10. Signature-sensitive spots: `Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable, true)` in
+   `ParamEditor` (the 1.3 form; older material3 wants the deprecated no-arg `menuAnchor()`),
+   `ColorScheme.copy(surfaceContainer*)` in `Theme.kt` (needs ≥ 1.2), the ~50 `Icons.Rounded.*` /
+   `Icons.AutoMirrored.Rounded.*` names from `material-icons-extended`, `ScaffoldDefaults.contentWindowInsets`,
+   and Coil's `context.imageLoader` / `ImageResult.drawable` / `ImageRequest.Builder.size(Int)`.
+6. **`MainActivity`'s Guava import.** `ListenableFuture` comes transitively from media3-session. If it
+   does not resolve, add `implementation("com.google.guava:guava")` — or delete the `MediaController`
+   connect block entirely: `AppGraph`'s delegating controller already starts the service on the first
+   command, so nothing else depends on it.
+7. **Manifest, resources and lint.** None of `AndroidManifest.xml` was validated. Check: the
+   `MediaLibraryService` intent filter and `foregroundServiceType="mediaPlayback"`, `Theme.Muisc`
+   (`android:Theme.Material.NoActionBar`, so no AppCompat needed), the adaptive launcher icon
+   (`mipmap-anydpi-v26` only — fine at `minSdk = 26`), and the `%d`/`%s` placeholders in
+   `strings.xml` against each `stringResource(id, arg)` call site. Lint will emit `InlinedApi` on the
+   `MediaStore` column constants that `MediaStoreScanner` guards with `Build.VERSION` checks
+   (`ALBUM_ARTIST`/`GENRE` at 30, `RELATIVE_PATH` at 29, `getGeneration` at 30) — those are safe.
+   No `backup_rules.xml` / `data_extraction_rules.xml` exist and nothing references them.
+8. **Release build.** `release` has `isMinifyEnabled`/`isShrinkResources` on and only
+   `proguard-rules.pro`'s kotlinx.serialization keeps. Verify a release APK actually starts: Room's
+   generated `*_Impl` classes, `AnalysisWorker`'s WorkManager-reflected constructor and
+   `Uri.parse`-driven Coil paths are the usual first casualties. Debug builds are unaffected.
+9. **Runtime behaviour nothing here can touch**: `AudioTrack` in `ENCODING_PCM_FLOAT` at the device
+   output rate, the `MediaCodec`/`MediaExtractor` decode path (`MediaCodecPcmStream`,
+   `AndroidAudioDecoder`), gapless tag parsing on real files, MediaSession/Android Auto browse,
+   WorkManager scheduling, and the audio-thread priority/underrun behaviour in `AudioTrackSink`.
+
+---
+
+## 4. Real gaps found by reading (no compiler will report these)
+
+1. **"Keep album flow" only half works.** The Settings switch writes both
+   `TransitionPrefs.keepAlbumFlowInShuffle` (engine, honoured) and `UiPrefs.keepAlbumFlowInPlaylists`
+   (app-only, **read by nobody**), and its subtitle promises "Shuffle *and playlists*". The engine's
+   `TransitionGating` returns `true` unconditionally for `PLAYLIST` and `QUEUE`, so a same-album pair
+   inside a playlist always gets a transition. This cannot be fixed in `:app` — gating is per-edge
+   inside the coordinator. It needs a `keepAlbumFlowInPlaylists` pref in
+   `engine/transitions/.../PlaybackContext.kt` and one more branch in `TransitionGating`. Left as is
+   rather than silently dropping the switch or faking it.
+2. **`PowerModeMonitor.setStrictSaver` is never called.** `PowerMode.STRICT_SAVER` (the documented
+   "no transitions on battery" user toggle, DESIGN §7.4) has no Settings UI, so only the automatic
+   `SAVER` path (system power-save, or < 15 % and not charging) can ever fire. Either add the switch
+   or drop the mode from the docs.
+3. **Search never finds playlists, and the SQL search is dead code.** `LibraryViewModel` searches
+   client-side over the hot library flows with its own `SearchResults` (songs/albums/artists), so
+   `LibraryRepository.search` and the `search` queries in `SongDao`/`AlbumDao`/`ArtistDao`/`PlaylistDao`
+   — which do include playlists, are indexed, and are limited — are unreachable. Two same-named
+   `SearchResults` types now exist (`data` and `ui.viewmodel`), as do two `SongSort` enums
+   (`data` and `ui.components`). Harmless to the compiler, confusing to a reader; pick one side.
+4. **Lab export lands in app-private storage on API 26–28.** `TransitionLabApi.export` documents
+   "the public Music/Muisc/Renders folder". On API 29+ that works through MediaStore; below it the
+   code needs `WRITE_EXTERNAL_STORAGE`, which the manifest does not declare, so it always falls back
+   to `getExternalFilesDir(...)`. Either declare the permission with `android:maxSdkVersion="28"` or
+   relax the KDoc.
+5. **`AnalysisWorker.enqueueNow` has no caller.** There is no "analyse my library now" action in
+   Settings, only the periodic job. `getForegroundInfo()` is likewise unreachable while `expedited`
+   defaults to false (correctly so — the manifest declares no `dataSync` foreground-service type).
+6. **`EngineControllerImpl.transitionLog()`, `LibraryRepository.analysedCount()`/`songCount()` have no
+   callers.** Settings shows no analysis progress and the Lab shows no decision log, although both
+   sources exist. Small, additive UI work.
+7. **`QueueManager.move` places the moved song in the *natural* order at the play-order index.** With
+   shuffle on those indices are unrelated, so turning shuffle off after a drag gives an arbitrary (but
+   valid — the index is coerced) position. Cosmetic; worth a test once the app runs.
+
+---
+
+## 5. Design notes worth keeping
+
+* `AppGraph.engineController` / `AppGraph.lab` are process-stable delegating instances
+  (`di/PlaybackBridge.kt`). The UI collects `engineController.state` once; when `PlaybackService`
+  installs the real controller the flow switches over and commands issued before the service bound
+  (a tap that started playback) are replayed in order from a bounded 32-entry buffer. The service is
+  started by class name with plain `startService`; it promotes itself to foreground through Media3's
+  default notification provider only once something plays.
+* The scanner is incremental: `DATE_MODIFIED > last scan`, deletions reconciled with an id-only query,
+  the blacklist applied to stored rows too, and album/artist/genre aggregates rebuilt in Kotlin inside
+  one Room transaction. On API 30+ an unchanged `MediaStore.getGeneration` short-circuits the whole
+  scan. Genres come from `MediaStore.Audio.Genres.Members` below API 30 and from the `GENRE` column
+  above it; `Genre.id` is a stable hash of the normalised name, which is what the `genre/{id}` route
+  and `SongDao.ofGenre`'s join rely on.
+* `RoomAnalysisCache` keeps a 64-entry LRU in front of Room and flips `Song.hasAnalysis` by matching
+  the analysis `sourceId` against `Song.uri` or `Song.path`. The playback layer passes
+  `AudioSourceId(song.uri)` everywhere (`QueueManager.sourceOf`), so the indicator lines up.
+* One audio thread at `THREAD_PRIORITY_URGENT_AUDIO` runs `render → interleave → write`; the blocking
+  `AudioTrack` write is the clock. The coordinator gets its own single thread one notch below the UI,
+  and analysis has two more (urgent / background). The controller never builds segments — the
+  coordinator is the only writer of the program.
+* The Lab runs the *same* planner, renderer and loader as playback, so what it auditions is what the
+  coordinator would install and the exported `renderKey` is reproducible on the CLI.

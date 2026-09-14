@@ -2,6 +2,7 @@ package dev.muisc.app.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.muisc.app.data.FolderNode
 import dev.muisc.app.data.LibraryRepository
 import dev.muisc.app.data.db.Album
 import dev.muisc.app.data.db.Artist
@@ -26,62 +27,12 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-/** A node of the folder tree built from [Song.path]. */
-data class FolderNode(
-    val name: String,
-    val path: String,
-    val children: List<FolderNode>,
-    val songs: List<Song>,
-) {
-    val totalSongs: Int get() = songs.size + children.sumOf { it.totalSongs }
-    /** All songs below this node, in folder order. */
-    fun allSongs(): List<Song> = songs + children.flatMap { it.allSongs() }
-}
-
 data class SearchResults(
     val songs: List<Song> = emptyList(),
     val albums: List<Album> = emptyList(),
     val artists: List<Artist> = emptyList(),
 ) {
     val isEmpty: Boolean get() = songs.isEmpty() && albums.isEmpty() && artists.isEmpty()
-}
-
-/** Builds a tree from the parent directories of all songs. Root has an empty path. */
-fun buildFolderTree(songs: List<Song>): FolderNode {
-    class Mut(val name: String, val path: String) {
-        val children = LinkedHashMap<String, Mut>()
-        val songs = ArrayList<Song>()
-        fun freeze(): FolderNode = FolderNode(
-            name = name,
-            path = path,
-            children = children.values.sortedBy { it.name.lowercase() }.map { it.freeze() },
-            songs = songs.sortedWith(compareBy({ it.disc }, { it.track }, { it.title.lowercase() })),
-        )
-    }
-    val root = Mut("", "")
-    for (song in songs) {
-        val dir = song.path.substringBeforeLast('/', "")
-        if (dir.isEmpty()) {
-            root.songs += song
-            continue
-        }
-        var node = root
-        val acc = StringBuilder()
-        for (segment in dir.split('/')) {
-            if (segment.isEmpty()) continue
-            acc.append('/').append(segment)
-            node = node.children.getOrPut(segment) { Mut(segment, acc.toString()) }
-        }
-        node.songs += song
-    }
-    return root.freeze()
-}
-
-/** Finds the node with the given path (or null). */
-fun FolderNode.find(path: String): FolderNode? {
-    if (this.path == path) return this
-    for (c in children) c.find(path)?.let { return it }
-    return null
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -109,8 +60,11 @@ class LibraryViewModel(private val repo: LibraryRepository) : ViewModel() {
     val mostPlayed: StateFlow<List<Song>> = repo.mostPlayed().hot()
     val history: StateFlow<List<Song>> = repo.history().hot()
 
-    val folderTree: StateFlow<FolderNode> = allSongs
-        .map { buildFolderTree(it) }
+    /**
+     * The folder view. Built by the repository from `Song.path` with `data.FolderTree` (the unit-tested builder,
+     * which also collapses single-child folder chains), so the folder screen and any other consumer see one tree.
+     */
+    val folderTree: StateFlow<FolderNode<Song>> = repo.folders()
         .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FolderNode("", "", emptyList(), emptyList()))
 
