@@ -39,7 +39,7 @@ import kotlinx.coroutines.launch
  * headset buttons and the Android Auto browse tree. Foreground promotion and the notification itself are Media3's
  * defaults (`DefaultMediaNotificationProvider`); the service is foreground only while something plays.
  *
- * Audio focus and the "becoming noisy" broadcast are handled here, driving the controller through its public
+ * The "becoming noisy" broadcast is handled here, driving the controller through its public
  * contract; ducking goes to the engine when the controller implements [DuckableEngine].
  */
 @OptIn(markerClass = [UnstableApi::class])
@@ -50,7 +50,6 @@ class PlaybackService : MediaLibraryService() {
     private var session: MediaLibrarySession? = null
     private var controller: EngineController? = null
     private var lab: TransitionLabApi? = null
-    private var focus: AudioFocusHandler? = null
     private var noisy: BecomingNoisyReceiver? = null
 
     private val library get() = AppGraph.libraryRepository
@@ -71,47 +70,25 @@ class PlaybackService : MediaLibraryService() {
             .apply { sessionActivityIntent()?.let { setSessionActivity(it) } }
             .build()
 
-        val focusHandler = AudioFocusHandler(
-            context = this,
-            onPause = { engineController.pause() },
-            onResume = { engineController.play() },
-            onDuck = { db -> (engineController as? DuckableEngine)?.setDuckDb(db) },
-        )
-        focus = focusHandler
+        // Audio focus is owned by EngineControllerImpl, which holds the state a transient loss needs and can duck
+        // the master gain directly. The service only watches for unplugged headphones.
         noisy = BecomingNoisyReceiver(this) { engineController.pause() }
-        observePlayback(engineController, focusHandler)
+        observePlayback(engineController)
     }
 
     /**
-     * Builds the engine graph.
-     *
-     * CROSS-PACKAGE CONTRACT: `EngineControllerImpl` and `TransitionLabImpl` belong to the sibling work package
-     * (they own the ProgramPlayer, the AudioTrackSink, the QueueManager and the TransitionCoordinator) and are
-     * constructed here with `(Context, CoroutineScope)`. If their constructors take more (for example the library
-     * repository, the settings repository or the analysis cache — all reachable through [AppGraph]), this is the
-     * single place to adjust.
+     * Builds the engine graph. [EngineGraph] wires the ProgramPlayer, the AudioTrack sink, the planner/renderer and
+     * the TransitionCoordinator, and returns the controller plus the Transition Lab that share them.
      */
-    private fun createEngine(): Pair<EngineController, TransitionLabApi> {
-        val engineController = EngineControllerImpl(applicationContext, serviceScope)
-        val engineLab = TransitionLabImpl(applicationContext, serviceScope)
-        return engineController to engineLab
-    }
+    private fun createEngine(): Pair<EngineController, TransitionLabApi> = EngineGraph.create(this)
 
-    /** Requests audio focus while playing and listens for unplugged headphones only while playing. */
-    private fun observePlayback(engineController: EngineController, focusHandler: AudioFocusHandler) {
+    /** Listens for unplugged headphones only while playing. */
+    private fun observePlayback(engineController: EngineController) {
         serviceScope.launch {
             engineController.state
                 .map { it.isPlaying }
                 .distinctUntilChanged()
-                .collect { playing ->
-                    focusHandler.playing = playing
-                    if (playing) {
-                        noisy?.register()
-                        if (!focusHandler.request()) engineController.pause()
-                    } else {
-                        noisy?.unregister()
-                    }
-                }
+                .collect { playing -> if (playing) noisy?.register() else noisy?.unregister() }
         }
     }
 
@@ -137,11 +114,18 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
+    /**
+     * Memory pressure: the engine drops the next pre-rendered transition (a live DJ move is installed instead) and
+     * cancels background analysis rather than risking the service being killed mid-track.
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        (controller as? EngineControllerImpl)?.onTrimMemory(level)
+    }
+
     override fun onDestroy() {
         noisy?.unregister()
         noisy = null
-        focus?.abandon()
-        focus = null
         session?.run {
             player.release()
             release()

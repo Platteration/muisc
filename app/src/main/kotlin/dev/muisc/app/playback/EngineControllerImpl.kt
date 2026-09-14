@@ -85,7 +85,7 @@ class EngineControllerImpl(
     private val persistence: QueuePersistence? = null,
     /** Called on the pump thread when a track starts playing (play history). */
     private val onSongStarted: ((Song, PlaybackContext) -> Unit)? = null,
-) : EngineController {
+) : EngineController, DuckableEngine {
 
     private val appContext: Context = context.applicationContext
 
@@ -160,25 +160,26 @@ class EngineControllerImpl(
     /** Focus was lost transiently and playback should resume by itself. */
     @Volatile private var resumeOnFocusGain = false
 
+    /**
+     * The controller is the single owner of audio focus: it holds the engine state that decides whether a transient
+     * loss should arm an auto-resume, and it can duck the master gain directly. [PlaybackService] must not create a
+     * second handler.
+     */
     private val focus: AudioFocusHandler = AudioFocusHandler(
         appContext,
-        onLoss = {
-            resumeOnFocusGain = false
+        onPause = { transient ->
+            resumeOnFocusGain = transient && _state.value.isPlaying
             pause()
-            abandonFocus()
+            if (!transient) abandonFocus()
         },
-        onTransientLoss = {
-            resumeOnFocusGain = _state.value.isPlaying
-            pause()
-        },
-        onRegain = {
+        onResume = {
             player.setDuckDb(0f)
             if (resumeOnFocusGain) {
                 resumeOnFocusGain = false
                 play()
             }
         },
-        onDuck = { ducking -> player.setDuckDb(if (ducking) DUCK_DB else 0f) },
+        onDuck = { db -> player.setDuckDb(db) },
     )
 
     init {
@@ -204,6 +205,7 @@ class EngineControllerImpl(
         if (released) return
         if (queue.current() == null) return
         requestFocus()
+        focus.playing = true
         _state.update { it.copy(error = null, isPlaying = true) }
         player.submit(EngineCommand.Play)
         transportLock.withLock {
@@ -218,6 +220,7 @@ class EngineControllerImpl(
 
     override fun pause() {
         if (released) return
+        focus.playing = false
         player.submit(EngineCommand.Pause)
         transportLock.withLock {
             // Only a running loop has to write the pause ramp out; a parked one stays parked.
@@ -767,28 +770,14 @@ class EngineControllerImpl(
 
     // ================================================================================================ audio focus
 
-    /**
-     * `AudioFocusHandler` is owned by the media package; only its constructor is part of the agreed contract, so
-     * request / abandon go through this tiny reflective shim. Replace both calls with the real method names when
-     * compiling locally (see the build notes) — the behaviour is identical, this only avoids guessing a name.
-     */
-    private fun requestFocus() = focusCall("requestFocus", "request", "requestAudioFocus", "acquire")
+    /** [DuckableEngine]: attenuates the engine's master gain (0 = none); the player ramps over ~50 ms. */
+    override fun setDuckDb(db: Float) { player.setDuckDb(db) }
 
-    private fun abandonFocus() = focusCall("abandonFocus", "abandon", "abandonAudioFocus", "release")
+    /** Requests audio focus before playback starts; playback proceeds only when it is granted. */
+    private fun requestFocus(): Boolean = focus.request()
 
-    private fun focusCall(vararg names: String) {
-        for (name in names) {
-            try {
-                val method = focus.javaClass.getMethod(name)
-                method.invoke(focus)
-                return
-            } catch (e: NoSuchMethodException) {
-                continue
-            } catch (t: Throwable) {
-                return
-            }
-        }
-    }
+    /** Releases audio focus when playback stops or the controller is released. */
+    private fun abandonFocus() = focus.abandon()
 
     companion object {
         /** Ducking depth when another app asks for transient focus that may duck (DESIGN §8). */
