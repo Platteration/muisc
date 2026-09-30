@@ -208,6 +208,12 @@ class RecipeValidatorTest {
         check(good.copy(timing = RecipeTiming(lengthBars = Expr("len"), tempo = RecipeTempo.NONE, bEntersAtBar = Expr("bars")))).noneAt("timing.bEntersAtBar")
     }
 
+    @Test fun bEntersAtBarOutsideNoneTempoIsAWarning() {
+        val r = check(good.copy(timing = good.timing.copy(bEntersAtBar = Expr("4"))))
+        assertTrue(r.valid && r.warning("timing.bEntersAtBar").message.contains("only used in"), r.toString())
+        check(good.copy(timing = good.timing.copy(bEntersAtBar = Expr("0.0")))).noneAt("timing.bEntersAtBar")
+    }
+
     @Test fun pointsOutOfTimeOrderAreAWarning() {
         val r = check(good.copy(b = good.b.copy(mid = listOf(p("4", "0"), p("2", "-6")))))
         assertTrue(r.warning("b.mid").message.contains("not in time order"), r.toString())

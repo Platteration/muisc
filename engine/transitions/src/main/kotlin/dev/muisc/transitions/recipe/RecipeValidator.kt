@@ -154,7 +154,7 @@ class RecipeValidator(
         }
 
         // Timing fields that do nothing in this tempo mode.
-        if (r.timing.tempo != RecipeTempo.NONE && r.timing.bEntersAtBar.source.trim() != "0") {
+        if (r.timing.tempo != RecipeTempo.NONE && r.timing.bEntersAtBar.literal != 0.0) {
             out.warning("unused-timing", "timing.bEntersAtBar", "bEntersAtBar is only used in \"none\" tempo; in \"${tempoName(r.timing.tempo)}\" B always enters at bar 0 of the overlap")
         }
         return resolvable
