@@ -1,0 +1,39 @@
+{
+  "id": "long-glide",
+  "name": "Long glide",
+  "description": "A very long, patient blend in which the tempo itself travels: over the whole overlap the beat slowly glides from the old song's tempo to the new song's, so the change of pace is felt rather than heard. The songs cross-fade at constant loudness, swap basslines halfway, and the old song's treble recedes in its last quarter. Made for songs a few BPM apart that deserve a long, deep mix, for example in a warm-up or a closing set.",
+  "author": "Muisc",
+  "ambition": 0.35,
+  "tags": ["glide", "tempo", "long", "blend", "beat-matched"],
+  "vars": {
+    "len": { "default": 32, "min": 16, "max": 64, "label": "Length", "unit": "bars", "doc": "How many bars the glide and the blend take", "integer": true },
+    "bassCut": { "default": 15, "min": 6, "max": 24, "label": "Bass cut", "unit": "dB", "doc": "How far the bass that is not leading is turned down" },
+    "highDip": { "default": 4, "min": 0, "max": 12, "label": "Treble dip", "unit": "dB", "doc": "How far the old song's treble recedes at the end" }
+  },
+  "timing": { "lengthBars": "len", "tempo": "glide", "align": "phrase", "settleBars": 2, "holdBars": 2 },
+  "rules": { "maxStretchPercent": 12, "baseScore": 0.6 },
+  "a": {
+    "level": [
+      { "at": 0, "v": 1, "curve": "equalPower" },
+      { "at": "bars", "v": 0 }
+    ],
+    "low": [
+      { "at": "bars / 2 - 2", "v": 0, "curve": "sCurve" },
+      { "at": "bars / 2", "v": "-bassCut" }
+    ],
+    "high": [
+      { "at": "3 * bars / 4", "v": 0, "curve": "sCurve" },
+      { "at": "bars", "v": "-highDip" }
+    ]
+  },
+  "b": {
+    "level": [
+      { "at": 0, "v": 0, "curve": "equalPower" },
+      { "at": "bars", "v": 1 }
+    ],
+    "low": [
+      { "at": "bars / 2 - 2", "v": "-bassCut", "curve": "sCurve" },
+      { "at": "bars / 2", "v": 0 }
+    ]
+  }
+}

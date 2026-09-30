@@ -1,0 +1,35 @@
+{
+  "id": "club-bass-swap",
+  "name": "Club bass swap",
+  "description": "The club DJ's EQ mix. The next song comes in beat-matched with its bass switched off, so only its drums and melody are heard over the current song. On a chosen bar the basses swap in one quick move: the new bass rises over a beat or so and the old one is cut on the downbeat, and from then on only one bassline plays. Punchy and clean; made for dance music with a solid kick and bass at matching tempos.",
+  "author": "Muisc",
+  "ambition": 0.55,
+  "tags": ["bass-swap", "eq", "club", "beat-matched"],
+  "vars": {
+    "len": { "default": 16, "min": 8, "max": 32, "label": "Length", "unit": "bars", "doc": "How many bars both songs play together", "integer": true },
+    "swapBar": { "default": 8, "min": 2, "max": 30, "label": "Swap bar", "unit": "bar", "doc": "The bar on which the basses swap (moved inside the blend when the blend is shorter)", "integer": true },
+    "swapBeats": { "default": 1, "min": 1, "max": 4, "label": "Swap length", "unit": "beats", "doc": "How many beats the new bass takes to come up before the old one is cut", "integer": true }
+  },
+  "timing": { "lengthBars": "len", "tempo": "match", "align": "phrase", "settleBars": 2, "holdBars": 2 },
+  "rules": { "minEnergyDelta": -0.5, "maxEnergyDelta": 0.5, "baseScore": 0.65 },
+  "a": {
+    "level": [
+      { "at": 0, "v": 1, "curve": "equalPower" },
+      { "at": "bars", "v": 0 }
+    ],
+    "low": [
+      { "at": "clamp(swapBar, 1, bars - 1)", "v": 0, "curve": "step" },
+      { "at": "clamp(swapBar, 1, bars - 1)", "v": "off" }
+    ]
+  },
+  "b": {
+    "level": [
+      { "at": 0, "v": 0, "curve": "equalPower" },
+      { "at": "bars", "v": 1 }
+    ],
+    "low": [
+      { "at": "clamp(swapBar, 1, bars - 1) - swapBeats * beat", "v": "off" },
+      { "at": "clamp(swapBar, 1, bars - 1)", "v": 0 }
+    ]
+  }
+}

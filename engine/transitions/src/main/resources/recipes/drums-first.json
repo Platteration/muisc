@@ -1,0 +1,57 @@
+{
+  "id": "drums-first",
+  "name": "Drums first",
+  "description": "A stem-by-stem handover. First only the new song's drums come in, locked to the beat, and take over from the old drums; then the basslines swap; finally the new song's melody and vocals rise while the old song fades out, its vocal tucked down so the two singers do not compete. It sounds like the new song is being built up piece by piece under the old one. Needs stem separation; with the built-in pseudo-stems the pieces leak into each other and it sounds more like a staggered EQ mix.",
+  "author": "Muisc",
+  "ambition": 0.65,
+  "tags": ["stems", "drums", "build", "beat-matched"],
+  "vars": {
+    "len": { "default": 16, "min": 12, "max": 32, "label": "Length", "unit": "bars", "doc": "How many bars the handover takes: drums at a quarter, bass at half, the rest after", "integer": true },
+    "handBeats": { "default": 2, "min": 1, "max": 4, "label": "Swap length", "unit": "beats", "doc": "How many beats each drum and bass swap takes", "integer": true },
+    "duck": { "default": 9, "min": 0, "max": 18, "label": "Vocal duck", "unit": "dB", "doc": "How far the old vocal is turned down when the new melody comes in" }
+  },
+  "timing": { "lengthBars": "len", "tempo": "match", "align": "phrase", "settleBars": 2, "holdBars": 2 },
+  "rules": { "baseScore": 0.6 },
+  "a": {
+    "level": [
+      { "at": "bars / 2", "v": 1, "curve": "equalPower" },
+      { "at": "bars", "v": 0 }
+    ],
+    "stems": {
+      "drums": [
+        { "at": "bars / 4", "v": 0, "curve": "sCurve" },
+        { "at": "bars / 4 + handBeats * beat", "v": "off" }
+      ],
+      "bass": [
+        { "at": "bars / 2 - beat", "v": 0, "curve": "sCurve" },
+        { "at": "bars / 2", "v": "off" }
+      ],
+      "vocals": [
+        { "at": "bars / 2", "v": 0, "curve": "sCurve" },
+        { "at": "bars / 2 + 2", "v": "-duck" }
+      ]
+    }
+  },
+  "b": {
+    "level": [
+      { "at": 0, "v": 0, "curve": "sCurve" },
+      { "at": "bars / 4", "v": 1 }
+    ],
+    "stems": {
+      "bass": [
+        { "at": "bars / 2 - handBeats * beat", "v": "off" },
+        { "at": "bars / 2", "v": 0 }
+      ],
+      "vocals": [
+        { "at": "bars / 2", "v": "off" },
+        { "at": "bars / 2 + beat", "v": -24 },
+        { "at": "3 * bars / 4", "v": 0 }
+      ],
+      "other": [
+        { "at": "bars / 2", "v": "off" },
+        { "at": "bars / 2 + beat", "v": -24 },
+        { "at": "3 * bars / 4", "v": 0 }
+      ]
+    }
+  }
+}

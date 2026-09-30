@@ -1,0 +1,41 @@
+{
+  "id": "echo-wash",
+  "name": "Echo wash",
+  "description": "The current song is fed into a tempo-synced echo over its last bars, then cut on the phrase line; its echoes keep repeating and fading while the next song starts right underneath them. Nothing is time-stretched, so it works between any two songs, whatever their tempos, and it covers a change of tempo or key gracefully. Longer, louder echoes make it more dramatic; short ones make it a quick flourish.",
+  "author": "Muisc",
+  "ambition": 0.6,
+  "tags": ["echo", "delay", "any-tempo", "cut"],
+  "vars": {
+    "riseBars": { "default": 2, "min": 1, "max": 4, "label": "Echo build", "unit": "bars", "doc": "Over how many bars before the cut the echo is turned up", "integer": true },
+    "sendMax": { "default": 0.8, "min": 0.4, "max": 1, "label": "Echo amount", "doc": "How much of the old song goes into the echo at the cut" },
+    "echoTime": { "default": 3, "min": 2, "max": 4, "label": "Echo time", "unit": "sixteenths", "doc": "2 = half a beat, 3 = a dotted eighth, 4 = one beat", "integer": true },
+    "feedback": { "default": 0.65, "min": 0.4, "max": 0.85, "label": "Echo repeats", "doc": "How much of each echo comes back; higher repeats longer" },
+    "tailBars": { "default": 4, "min": 2, "max": 8, "label": "Tail", "unit": "bars", "doc": "How many bars the echoes ring under the new song before it plays alone", "integer": true }
+  },
+  "timing": { "lengthBars": 8, "tempo": "none", "align": "phrase", "bEntersAtBar": "bars", "holdBars": "tailBars" },
+  "rules": { "baseScore": 0.5 },
+  "a": {
+    "level": [
+      { "at": 0, "v": 1 },
+      { "at": "bars - beat", "v": 1, "curve": "sCurve" },
+      { "at": "bars", "v": 0 }
+    ],
+    "echo": {
+      "send": [
+        { "at": "bars - riseBars", "v": 0, "curve": "exp" },
+        { "at": "bars", "v": "sendMax" },
+        { "at": "bars + beat", "v": 0 }
+      ],
+      "beats": "echoTime / 4",
+      "feedback": "feedback",
+      "dampHz": 3500,
+      "returnLevel": 1
+    }
+  },
+  "b": {
+    "level": [
+      { "at": "bars - beat", "v": 0, "curve": "sCurve" },
+      { "at": "bars", "v": 1 }
+    ]
+  }
+}
