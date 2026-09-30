@@ -16,8 +16,9 @@ import dev.muisc.transitions.sdk.StrategyTraits
 /**
  * A [TransitionRecipe] as a first-class strategy with id `recipe:<id>`. Its parameters are the recipe's variables.
  *
- * FROZEN SIGNATURE — the render engine behind [applicability], [plan] and [render] is implemented by the recipe
- * renderer work package; until then those three throw.
+ * FROZEN SIGNATURE. [applicability] is [RecipeScoring] (rules as blockers, then a score; never throws), [plan] is
+ * [RecipeGeometry.plan] (frames per tempo mode, the recipe's lanes for the Lab, notes explaining every choice) and
+ * [render] is [RecipeRenderer] (stems, EQ, filters, pre-fader sends into echo / reverb, level, splice guards).
  */
 class RecipeStrategy(val recipe: TransitionRecipe) : TransitionStrategy, StrategyTraits {
     override val id: String = recipe.strategyId
@@ -29,11 +30,11 @@ class RecipeStrategy(val recipe: TransitionRecipe) : TransitionStrategy, Strateg
     override val needsStems: Boolean get() = recipe.a.stems != null || recipe.b.stems != null
 
     override fun applicability(features: PairFeatures, a: TrackAnalysis, b: TrackAnalysis, prefs: TransitionPrefs): Applicability =
-        throw NotImplementedError("recipe renderer not implemented yet")
+        RecipeScoring.applicability(recipe, features, a, b, prefs)
 
     override fun plan(a: TrackAnalysis, b: TrackAnalysis, features: PairFeatures, params: Params, prefs: TransitionPrefs, seed: Long): TransitionPlan =
-        throw NotImplementedError("recipe renderer not implemented yet")
+        RecipeGeometry.plan(id, recipe, a, b, features, params, prefs)
 
     override fun render(input: TransitionInput, ctx: RenderContext): RenderedTransition =
-        throw NotImplementedError("recipe renderer not implemented yet")
+        RecipeRenderer.render(recipe, input, ctx)
 }
