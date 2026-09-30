@@ -11,6 +11,10 @@ import dev.muisc.analysis.model.TrackAnalysis
 import dev.muisc.audio.AudioBuffer
 import dev.muisc.audio.synth.Synth
 import dev.muisc.transitions.TrackRef
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import java.io.File
 
 /**
@@ -34,7 +38,7 @@ class AnalyzeCommand : MuiscCommand("analyze") {
         if (click != null && files.size != 1) throw CliktError("--click works on exactly one file (got ${files.size})")
         val refs = files.map { ctx.trackRef(it, force) }
         if (json) {
-            echo(if (refs.size == 1) refs[0].analysis.toJson() else refs.joinToString(",\n", "[\n", "\n]") { it.analysis.toJson() })
+            echo(if (refs.size == 1) jsonOf(refs[0].analysis) else refs.joinToString(",\n", "[\n", "\n]") { jsonOf(it.analysis) })
         } else {
             refs.forEachIndexed { i, ref ->
                 if (i > 0) echo("")
@@ -66,6 +70,7 @@ class AnalyzeCommand : MuiscCommand("analyze") {
         row("edges", "intro ${a.intro}  outro ${a.outro}")
         row("cues", cues(a))
         row("brightness", "${Fmt.num(a.brightnessHz.toDouble(), 0)} Hz  onsets ${a.onsetFrames.size}  bars analysed ${a.bars.barCount}")
+        row("identity", "${a.identity}  (pins are keyed by it: `muisc pin set --identities`)")
         row("analysis", "${a.analysisMillis} ms  version ${a.version}  fingerprint ${a.fingerprint.take(24)}…")
         val head = Fmt.table(rows)
         val sections = if (a.sections.isEmpty()) "  (no sections)" else Fmt.table(
@@ -80,6 +85,12 @@ class AnalyzeCommand : MuiscCommand("analyze") {
             "  ",
         )
         return "$head\nsections (${a.sections.size}):\n$sections"
+    }
+
+    /** The TrackAnalysis JSON with its `identity` (a computed property, so not serialized) added as the first key. */
+    private fun jsonOf(a: TrackAnalysis): String {
+        val fields = TrackAnalysis.json.parseToJsonElement(a.toJson()).jsonObject
+        return JsonObject(linkedMapOf<String, JsonElement>("identity" to JsonPrimitive(a.identity)) + fields).toString()
     }
 
     private fun cues(a: TrackAnalysis): String {

@@ -23,6 +23,8 @@ import dev.muisc.transitions.TrackRef
 import dev.muisc.transitions.TransitionInput
 import dev.muisc.transitions.TransitionPlan
 import dev.muisc.transitions.TransitionPrefs
+import dev.muisc.transitions.TransitionStrategy
+import dev.muisc.transitions.custom.PresetResolution
 import dev.muisc.transitions.core.DeckGain
 import java.io.File
 import kotlin.math.max
@@ -44,7 +46,8 @@ object RenderSupport {
      *
      * With no switches this is the planner's best. `--strategy` picks that id out of the ranking (or, when the
      * planner skipped it because it is blocked on this pair, builds it anyway so the user can still listen to it).
-     * `--set` / `--modifier` re-run `strategy.plan()` with the merged params and re-attach the modifiers exactly
+     * `--set` / `--modifier` re-run `strategy.plan()` with the planner's values for the pair ([plannedParams]: presets,
+     * overrides and the pair's pin) plus `--set` on top, and re-attach the modifiers exactly
      * the way [dev.muisc.transitions.planner.DefaultTransitionPlanner] does, so `plan.params` stays self-describing
      * and the [dev.muisc.transitions.RenderKey] covers the overrides.
      */
@@ -70,9 +73,7 @@ object RenderSupport {
         unknownParams(strategy.params.map { it.id }, sets.keys).takeIf { it.isNotEmpty() }?.let {
             throw CliktError("unknown parameter(s) for '${strategy.id}': ${it.joinToString(", ")}. Known: ${strategy.params.joinToString(", ") { p -> p.id }}")
         }
-        val params = Params.defaults(strategy.params)
-            .withAll(prefs.paramOverrides[strategy.id].orEmpty())
-            .withAll(sets)
+        val params = plannedParams(ctx, a, b, strategy).withAll(sets)
         var plan = try {
             strategy.plan(a.analysis, b.analysis, features, params, prefs, seed)
         } catch (e: Exception) {
@@ -88,15 +89,35 @@ object RenderSupport {
         return PlanCandidate(strategy, base.applicability, base.score, plan, modifiers)
     }
 
+    /**
+     * The values the planner gives [strategy] for the pair `a → b`, layered as [PresetResolution] documents, lowest
+     * first: the defaults ← the active preset ← `prefs.paramOverrides` ← the pair's pin when it is for this strategy
+     * (its preset, then its own params). `--set` and sweep values go on top of these, so re-planning a pinned pair
+     * never drops what the pin set.
+     */
+    fun plannedParams(ctx: CliContext, a: TrackRef, b: TrackRef, strategy: TransitionStrategy): Params {
+        val lookup = ctx.customization.presets
+        var overrides = PresetResolution.overrides(strategy.id, ctx.prefs, lookup)
+        val pin = ctx.customization.pins.pin(a.analysis.identity, b.analysis.identity)
+        if (pin != null && pin.strategyId == strategy.id) {
+            val pinPreset = pin.presetId?.let { lookup.preset(it) }?.takeIf { it.strategyId == strategy.id }
+            overrides = overrides + pinPreset?.params?.values.orEmpty() + pin.params?.values.orEmpty()
+        }
+        return Params.defaults(strategy.params).withAll(overrides)
+    }
+
     private fun unknownParams(known: List<String>, given: Set<String>): List<String> = given.filter { it !in known }
 
-    /** A candidate for a strategy the planner did not rank (blocked or disabled) — so `--strategy` always works. */
+    /**
+     * A candidate for a strategy the planner did not rank (blocked or disabled) — so `--strategy` always works. Its
+     * values are [plannedParams]: a pin for this pair and strategy applies even though the planner could not use it.
+     */
     fun forced(ctx: CliContext, a: TrackRef, b: TrackRef, features: PairFeatures, strategyId: String, seed: Long): PlanCandidate {
         val strategy = ctx.registry.strategy(strategyId)
             ?: throw CliktError("unknown strategy '$strategyId'. Known: ${ctx.registry.strategyIds.joinToString(", ")}")
         val prefs = ctx.prefs
         val app = strategy.applicability(features, a.analysis, b.analysis, prefs)
-        val params = Params.defaults(strategy.params).withAll(prefs.paramOverrides[strategyId].orEmpty())
+        val params = plannedParams(ctx, a, b, strategy)
         val plan = try {
             strategy.plan(a.analysis, b.analysis, features, params, prefs, seed)
         } catch (e: Exception) {

@@ -52,13 +52,23 @@ import java.io.File
  * @param preset the `--preset` in force: the planner treats every pair as pinned to that preset's strategy (it
  *   still falls back when the strategy is blocked for the pair) and the preset's values are folded into
  *   [prefs]`.paramOverrides` by [MuiscCommand].
+ * @param restyle the command line's prefs resolved again with another style in place of `--style` (see
+ *   [prefsWithStyle]). Null for a context built without a command line: [prefs] then count as unstyled.
  */
 class CliContext(
     val prefs: TransitionPrefs,
     val cacheDir: File,
     val profile: UserProfile? = null,
     val preset: StrategyPreset? = null,
+    private val restyle: ((StyleProfile?) -> TransitionPrefs)? = null,
 ) : AutoCloseable {
+
+    /**
+     * The prefs the command line gives with [style] in place of its `--style` (null: no style), in [PrefsIo.resolve]'s
+     * order — prefs file ← style ← `--set-pref` ← `--rate`/`--channels` — and before presets are folded. So a style
+     * picked later (the Lab's style menu) replaces the command line's instead of compounding with it.
+     */
+    fun prefsWithStyle(style: StyleProfile?): TransitionPrefs = restyle?.invoke(style) ?: (style?.apply(prefs) ?: prefs)
 
     val decoder: AudioDecoder = JavaSoundDecoder()
     val cache: FileAnalysisCache = FileAnalysisCache(cacheDir)
@@ -183,11 +193,13 @@ abstract class MuiscCommand(name: String) : CliktCommand(name = name) {
         val preset: StrategyPreset? = presetOpt?.let { id ->
             profile.presetLookup.preset(id) ?: throw CliktError("unknown preset '$id'. Known: ${profile.presets.all().joinToString(", ") { it.id }}")
         }
-        val resolved = PrefsIo.resolve(prefsFile, prefAssignments, rateOpt, channelsOpt, style)
+        val loaded = PrefsIo.load(prefsFile)
+        val restyle = { s: StyleProfile? -> PrefsIo.resolve(loaded, prefAssignments, rateOpt, channelsOpt, s) }
+        val resolved = restyle(style)
         // Fold active presets (and --preset) into paramOverrides so every code path that re-plans from the overrides
         // (render --set, forced strategies) sees the same values as the planner.
         val prefs = PresetResolution.fold(resolved, profile.presetLookup, preset)
-        CliContext(prefs, CliContext.defaultCacheDir(cacheDirOpt), profile, preset).use { ctx ->
+        CliContext(prefs, CliContext.defaultCacheDir(cacheDirOpt), profile, preset, restyle).use { ctx ->
             for (w in ctx.recipeWarnings) echo("warning: $w", err = true)
             if (preset != null && ctx.registry.strategy(preset.strategyId) == null) {
                 throw CliktError("preset '${preset.id}' is for strategy '${preset.strategyId}', which is not registered. Known: ${ctx.registry.strategyIds.joinToString(", ")}")
@@ -245,8 +257,11 @@ object PrefsIo {
     }
 
     /** Prefs file ← [style] ← `--set-pref` [assignments] ← `--rate` / `--channels`. */
-    fun resolve(file: File?, assignments: List<String>, rate: Int?, channels: Int?, style: StyleProfile? = null): TransitionPrefs {
-        val loaded = load(file)
+    fun resolve(file: File?, assignments: List<String>, rate: Int?, channels: Int?, style: StyleProfile? = null): TransitionPrefs =
+        resolve(load(file), assignments, rate, channels, style)
+
+    /** [loaded] (an already read prefs file) ← [style] ← `--set-pref` [assignments] ← `--rate` / `--channels`. */
+    fun resolve(loaded: TransitionPrefs, assignments: List<String>, rate: Int?, channels: Int?, style: StyleProfile? = null): TransitionPrefs {
         var prefs = apply(style?.apply(loaded) ?: loaded, assignments)
         if (rate != null) {
             if (rate < 8000 || rate > 192_000) throw CliktError("--rate $rate is out of range (8000..192000)")

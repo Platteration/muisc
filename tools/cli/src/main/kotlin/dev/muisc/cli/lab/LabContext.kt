@@ -70,15 +70,16 @@ class LabContext(val cli: CliContext, val sessionDir: File) : AutoCloseable {
         DefaultTransitionPlanner(registry, cli.pairAnalyzer, customization = customization)
 
     /**
-     * The preferences for one request: the command line's (`--prefs`, `--set-pref`, `--style`, `--preset` already
-     * folded in by the command) with the page's chosen style applied on top and active presets folded into
-     * `paramOverrides`, exactly like `MuiscCommand` does. [styleId] null or blank keeps the command line's.
+     * The preferences for one request. [styleId] null or blank: the command line's as they are (`--prefs`,
+     * `--set-pref`, `--style`, `--preset` already folded in by the command). Otherwise the page's style takes the
+     * place of the command line's `--style` — prefs file ← that style ← `--set-pref` ← `--rate`/`--channels`, then
+     * active presets and `--preset` folded into `paramOverrides` — exactly the prefs `MuiscCommand` builds for
+     * `--style <styleId>`. Styles never stack.
      */
     fun prefs(styleId: String?): TransitionPrefs {
-        val base = cli.prefs
-        if (styleId.isNullOrBlank()) return base
+        if (styleId.isNullOrBlank()) return cli.prefs
         val style = profile.style(styleId) ?: throw LabError(400, "unknown style '$styleId'. Known: ${profile.styles.all().joinToString(", ") { it.id }}")
-        return PresetResolution.fold(style.apply(base), profile.presetLookup, cli.preset)
+        return PresetResolution.fold(cli.prefsWithStyle(style), profile.presetLookup, cli.preset)
     }
 
     fun features(a: TrackRef, b: TrackRef, prefs: TransitionPrefs): PairFeatures = cli.pairAnalyzer.features(a.analysis, b.analysis, prefs)

@@ -378,6 +378,54 @@ class LabServerTest {
         assertFalse(File(profileDir, "recipes/bad-save.json").exists())
     }
 
+    @Test
+    fun `saving over an existing user recipe asks first and writes nothing until replace is confirmed`() {
+        val file = File(profileDir, "recipes/keep-me.json")
+        val first = RecipeCodec.encode(RecipeLibrary.starter("keep-me", "Sunset blend"))
+        assertEquals(true, post("/api/recipes/save", buildJsonObject { put("text", first) }).json["ok"]!!.jsonPrimitive.content.toBoolean())
+        val before = file.readText()
+
+        // Same id, another recipe: refused with a conflict that names the recipe it would replace; the file is untouched.
+        val second = RecipeCodec.encode(RecipeLibrary.starter("keep-me", "Club cut"))
+        val conflict = post("/api/recipes/save", buildJsonObject { put("text", second) })
+        assertEquals(200, conflict.status, conflict.body)
+        assertEquals(false, conflict.json["ok"]!!.jsonPrimitive.content.toBoolean(), conflict.body)
+        assertEquals(true, conflict.json["conflict"]?.jsonPrimitive?.content?.toBoolean(), conflict.body)
+        assertEquals("keep-me", conflict.json["id"]?.jsonPrimitive?.content)
+        assertEquals("Sunset blend", conflict.json["existingName"]?.jsonPrimitive?.content)
+        assertEquals(before, file.readText())
+        assertEquals(listOf("keep-me.json"), File(profileDir, "recipes").list()!!.filter { it.startsWith("keep-me") })
+
+        // "replace": false is the same as leaving it out.
+        val no = post("/api/recipes/save", buildJsonObject { put("text", second); put("replace", false) }).json
+        assertEquals(true, no["conflict"]?.jsonPrimitive?.content?.toBoolean(), no.toString())
+        assertEquals(before, file.readText())
+
+        // Confirmed: replaced.
+        val yes = post("/api/recipes/save", buildJsonObject { put("text", second); put("replace", true) }).json
+        assertEquals(true, yes["ok"]!!.jsonPrimitive.content.toBoolean(), yes.toString())
+        assertTrue(file.readText().contains("Club cut"))
+        assertEquals(null, yes["conflict"])
+    }
+
+    @Test
+    fun `the blank template takes a recipe id that is not in use`() {
+        val firstText = get("/api/recipes/template").json["text"]!!.jsonPrimitive.content
+        val firstId = RecipeCodec.parse(firstText).recipe!!.id
+        assertEquals("my-transition", firstId) // no other test saves this id
+        assertEquals(true, post("/api/recipes/save", buildJsonObject { put("text", firstText) }).json["ok"]!!.jsonPrimitive.content.toBoolean())
+
+        // A second blank template must not reuse the id just saved.
+        val secondText = get("/api/recipes/template").json["text"]!!.jsonPrimitive.content
+        val secondId = RecipeCodec.parse(secondText).recipe!!.id
+        assertEquals("my-transition-2", secondId, "the template must not reuse '$firstId'")
+        assertTrue(RecipeLibrary(File(profileDir, "recipes")).load().all(secondId).isEmpty(), secondId)
+        val saved = post("/api/recipes/save", buildJsonObject { put("text", secondText) }).json
+        assertEquals(true, saved["ok"]!!.jsonPrimitive.content.toBoolean(), saved.toString())
+        assertTrue(File(profileDir, "recipes/$firstId.json").isFile)
+        assertTrue(File(profileDir, "recipes/$secondId.json").isFile)
+    }
+
     // ---- blind test -----------------------------------------------------------------------------------------------------
 
     @Test

@@ -229,6 +229,10 @@ caption { text-align: left; font-weight: 600; padding: 0.3rem 0; }
 .problems .sev.warning { background: var(--warn-bg); color: var(--warn-fg); }
 .ok-text { color: var(--pass-fg); font-weight: 600; }
 .err-text { color: var(--fail-fg); font-weight: 600; }
+/* The save conflict: panel background so its buttons keep their measured outline contrast; the warning colour is the frame. */
+.conflict { color: var(--text); background: var(--panel); border: 1px solid var(--warn-fg); border-left-width: 6px; border-radius: 6px; padding: 0.5rem 0.75rem; margin: 0.4rem 0; }
+.conflict p { margin: 0 0 0.3rem; }
+.conflict .row { margin: 0; }
 
 /* ---- blind test / sweep ------------------------------------------------------------------------- */
 .blind-candidates { display: flex; flex-direction: column; gap: 0.4rem; }

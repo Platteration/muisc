@@ -34,6 +34,12 @@ muisc analyze song.flac --click grid.wav  # the song with a click on every detec
 
 If a transition lands off-beat, listen to `--click` first: almost always the grid is the problem, not the strategy.
 
+The `identity` line (and the `identity` key of `--json`) is a hash of the decoded audio. Pins are keyed by it, so a
+pin follows the music when a file is copied, touched or re-tagged. `muisc pin set A B STRATEGY --identities` and
+`pin clear --identities` take identities instead of files. `pin list` prints the identities in full. If you pass an
+analysis `fingerprint` from the cache instead, it is replaced by that track's identity and the command says so. A
+value that matches no analysed track is still stored, with a warning.
+
 ## Choosing a transition
 
 ```
@@ -51,6 +57,12 @@ muisc render a.flac b.flac -o t.wav                                   # the plan
 muisc render a.flac b.flac --strategy bassSwap --set swapBar=12 -o t.wav
 muisc render a.flac b.flac --strategy echoOut --modifier textureCarry --context 20 -o t.wav
 ```
+
+`--set` goes on top of the values the planner uses for the pair: the defaults, the active preset,
+`paramOverrides`, and the pair's pin if it is for that strategy (the pin's preset, then its own values). A pinned
+pair therefore keeps everything the pin set except the values you change. The same layering applies to
+`--modifier`, to `--strategy` for a strategy the planner did not rank (blocked or disabled), and to every point of
+`muisc sweep`.
 
 Writes `t.wav` (the transition segment), `t.plan.json`, `t.report.json` (render report plus metrics) and, with
 `--context N`, `t.context.wav`: N seconds of A, the segment and N seconds of B played through the real program
@@ -140,7 +152,10 @@ What the page does:
   validated as you type: every problem with severity, path, line and column; clicking one selects that line.
   The recipe's knobs become sliders and the lanes are plotted at those values. **Render without saving** renders
   the text as it is; **Save to my recipes** writes `<profile>/recipes/<id>.json` (refused while it has errors)
-  and the new `recipe:<id>` strategy appears in the ranking at once.
+  and the new `recipe:<id>` strategy appears in the ranking at once. If one of your recipes already has that id,
+  nothing is written until you confirm: the page names the recipe and its file and offers **Replace it** or
+  **Cancel**. It does not ask when you save again the user recipe you loaded into the editor with the same id. The
+  blank template starts with an id no recipe or file uses yet (`my-transition`, then `my-transition-2`, ...).
 - **Blind test.** Choose 2–4 candidates (strategies, presets, or the recipe in the editor). They are rendered and
   shuffled under the names X, Y, Z, W; the page shows only their waveforms until you vote. Your pick is rated up
   and every other candidate down in the pair's rating context (a candidate with the same strategy as the pick is
@@ -149,8 +164,11 @@ What the page does:
 - **Sweep.** One numeric parameter over a range (2–12 renders), a chosen metric plotted against it with its
   warn/fail thresholds; every point is playable.
 - **Library.** Presets (use, delete), pins (clear) and what was learned from your ratings.
+- **Style.** The style menu replaces the `--style` the Lab was started with; the two are never applied together.
+  The other options still apply, and `--set-pref` still wins. **As started** keeps the command line's prefs.
 
-Renders are written to a temporary session folder (printed at start) and deleted when the Lab stops; only files
+Renders are written to a temporary session folder (printed at start) and deleted when the Lab stops. That includes
+Ctrl-C or SIGTERM while it is still writing the fixtures or analysing at startup. Only files
 from that folder are served. The server listens on 127.0.0.1 only, so other machines cannot reach it. Because a
 web page open in your browser can still send requests to 127.0.0.1, the Lab also refuses requests whose `Host`
 is not `127.0.0.1`/`localhost`/`[::1]` with its port (DNS rebinding), requests whose `Origin` is another site,
@@ -162,4 +180,5 @@ system setting. Measured WCAG contrast of text on its background: light theme �
 text 5.5–6.7:1, links and accent 6.2–6.7:1, primary button text 6.7:1, PASS/WARN/FAIL badges 7.3/7.5/6.8:1;
 dark theme — body text 11.2–16.0:1, secondary text 5.8–8.3:1, accent 6.8–7.4:1, primary button text 7.4:1,
 badges 8.7/9.0/8.0:1. Control outlines are 3.3:1 (light) and 3.7:1 (dark); lane colours are at least 4.3:1
-against the waveform background in both themes.
+against the waveform background in both themes. The recipe-save question uses body text on the panel (16.6:1 light,
+14.6:1 dark) inside a warning-coloured frame (8.6:1 light, 11.6:1 dark), and its buttons are the ordinary ones.

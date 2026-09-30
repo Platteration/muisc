@@ -19,6 +19,8 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.PrintStream
 import java.nio.charset.StandardCharsets
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -40,6 +42,9 @@ class CustomizationCommandsTest {
         lateinit var root: File
 
         private val cache: File get() = File(root, "cache")
+
+        /** The option that says A and B are track identities rather than files. */
+        private const val IDS = "--identities"
         private lateinit var songs: Cli.Songs
 
         @JvmStatic
@@ -217,9 +222,12 @@ class CustomizationCommandsTest {
     // ---- pins -----------------------------------------------------------------------------------------------
 
     @Test
-    fun `pin set, list and clear by fingerprint`() {
+    fun `pin set, list and clear by identity`() {
         assertContains(run(PinCommand(), "list"), "no pins")
-        assertContains(run(PinCommand(), "set", "fp-a", "fp-b", "echoOut", "--preset", "dub-echo", "--set", "tailBars=6", "--fingerprints", "--note", "my favourite"), "pinned echoOut (preset dub-echo)")
+        val set = run(PinCommand(), "set", "fp-a", "fp-b", "echoOut", "--preset", "dub-echo", "--set", "tailBars=6", IDS, "--note", "my favourite")
+        assertContains(set, "pinned echoOut (preset dub-echo)")
+        assertContains(set, "warning: 'fp-a' is not the identity of any analysed track")
+        assertContains(set, "warning: 'fp-b' is not the identity of any analysed track")
         val pin = UserProfile(profileDir).pins.pin("fp-a", "fp-b")!!
         assertEquals("dub-echo", pin.presetId)
         assertEquals(mapOf("tailBars" to "6"), pin.params!!.values)
@@ -228,11 +236,55 @@ class CustomizationCommandsTest {
         assertContains(list, "echoOut")
         assertContains(list, "tailBars=6")
         assertContains(list, "1 pin(s)")
-        assertContains(assertFailsWith<CliktError> { run(PinCommand(), "set", "fp-a", "fp-b", "echoOut", "--preset", "tight-bass-swap", "--fingerprints") }.message!!, "is for bassSwap")
-        assertContains(assertFailsWith<CliktError> { run(PinCommand(), "set", "fp-a", "fp-b", "warp", "--fingerprints") }.message!!, "unknown strategy")
-        assertContains(assertFailsWith<CliktError> { run(PinCommand(), "set", "fp-a", "fp-b", "echoOut", "--set", "tailBars=99", "--fingerprints") }.message!!, "outside")
-        assertContains(run(PinCommand(), "clear", "fp-a", "fp-b", "--fingerprints"), "cleared")
-        assertContains(assertFailsWith<CliktError> { run(PinCommand(), "clear", "fp-a", "fp-b", "--fingerprints") }.message!!, "no pin")
+        assertContains(assertFailsWith<CliktError> { run(PinCommand(), "set", "fp-a", "fp-b", "echoOut", "--preset", "tight-bass-swap", IDS) }.message!!, "is for bassSwap")
+        assertContains(assertFailsWith<CliktError> { run(PinCommand(), "set", "fp-a", "fp-b", "warp", IDS) }.message!!, "unknown strategy")
+        assertContains(assertFailsWith<CliktError> { run(PinCommand(), "set", "fp-a", "fp-b", "echoOut", "--set", "tailBars=99", IDS) }.message!!, "outside")
+        assertContains(run(PinCommand(), "clear", "fp-a", "fp-b", IDS), "cleared")
+        assertContains(assertFailsWith<CliktError> { run(PinCommand(), "clear", "fp-a", "fp-b", IDS) }.message!!, "no pin")
+    }
+
+    private fun analysisOf(f: File) = CliContext(TransitionPrefs(), cache).use { it.trackRef(f).analysis }
+
+    @Test
+    fun `analyze prints the full identity that pins are keyed by`() {
+        val an = analysisOf(songs.a)
+        assertTrue(an.identity != an.fingerprint, "the current analyzer keys identity on the audio, not the file")
+        val text = Cli.run(cache, "analyze", songs.a.absolutePath)
+        assertTrue(text.lines().any { it.trim().startsWith("identity") && it.contains(an.identity) }, text)
+        val json = Cli.run(cache, "analyze", songs.a.absolutePath, "--json")
+        val obj = kotlinx.serialization.json.Json.parseToJsonElement(json.substring(json.indexOf('{'), json.lastIndexOf('}') + 1)).jsonObject
+        assertEquals(an.identity, obj["identity"]?.jsonPrimitive?.content, json.take(300))
+        assertEquals(an.fingerprint, obj["fingerprint"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `pin set with analysis fingerprints stores the tracks' identities, so the planner honours it`() {
+        val a = analysisOf(songs.a)
+        val b = analysisOf(songs.b)
+        val out = run(PinCommand(), "set", a.fingerprint, b.fingerprint, "crossfade", "--preset", "long-crossfade", IDS)
+        val pins = UserProfile(profileDir).pins
+        assertNotNull(pins.pin(a.identity, b.identity), "stored under the identities (output: $out)")
+        assertNull(pins.pin(a.fingerprint, b.fingerprint))
+        assertContains(Cli.run(cache, "plan", songs.a.absolutePath, songs.b.absolutePath, "--profile-dir", profileDir.absolutePath), "pinned by you")
+        assertContains(out, "is an analysis fingerprint")
+        assertContains(out, "now: pinned by you")
+
+        // `pin list` shows the identities in full, so they can be copied.
+        val list = run(PinCommand(), "list")
+        assertContains(list, a.identity)
+        assertContains(list, b.identity)
+
+        // clear accepts the fingerprints too, and the identities work directly with no warning.
+        assertContains(run(PinCommand(), "clear", a.fingerprint, b.fingerprint, IDS), "cleared")
+        assertNull(UserProfile(profileDir).pins.pin(a.identity, b.identity))
+        val direct = run(PinCommand(), "set", a.identity, b.identity, "crossfade", IDS)
+        assertContains(direct, "now: pinned by you")
+        assertFalse(direct.contains("warning"), direct)
+
+        // A pin set from the files is cleared by fingerprint.
+        run(PinCommand(), "clear", a.identity, b.identity, IDS)
+        run(PinCommand(), "set", songs.a.absolutePath, songs.b.absolutePath, "crossfade")
+        assertContains(run(PinCommand(), "clear", a.fingerprint, b.fingerprint, IDS), "cleared")
     }
 
     @Test
@@ -253,6 +305,56 @@ class CustomizationCommandsTest {
         val blocked = run(PinCommand(), "set", songs.a.absolutePath, songs.c.absolutePath, "bassSwap")
         assertContains(blocked, "warning: pinned bassSwap not used")
         assertContains(blocked, "normal ranking applies")
+    }
+
+    @Test
+    fun `render --set keeps the pair's pinned preset and params under the value it changes`() {
+        run(PinCommand(), "set", songs.a.absolutePath, songs.b.absolutePath, "crossfade", "--preset", "quick-crossfade", "--set", "law=S_CURVE")
+        val pinned = File(root, "out/pin-plain.wav")
+        run(RenderCommand(), songs.a.absolutePath, songs.b.absolutePath, "-o", pinned.absolutePath)
+        val plainPlan = File(pinned.parentFile, "pin-plain.plan.json").readText()
+        assertContains(plainPlan, "\"fadeSec\": \"3\"")
+        assertContains(plainPlan, "\"law\": \"S_CURVE\"")
+
+        val tweaked = File(root, "out/pin-set.wav")
+        val text = run(RenderCommand(), songs.a.absolutePath, songs.b.absolutePath, "-o", tweaked.absolutePath, "--set", "alignToBeat=false")
+        assertContains(text, "strategy: crossfade")
+        val plan = File(tweaked.parentFile, "pin-set.plan.json").readText()
+        assertContains(plan, "\"alignToBeat\": \"false\"")
+        assertContains(plan, "\"fadeSec\": \"3\"", message = "the pin's preset value survives --set")
+        assertContains(plan, "\"law\": \"S_CURVE\"", message = "the pin's own value survives --set")
+
+        // --set on a key the pin sets wins over the pin (layer 5 over layer 4).
+        val over = File(root, "out/pin-over.wav")
+        run(RenderCommand(), songs.a.absolutePath, songs.b.absolutePath, "-o", over.absolutePath, "--set", "law=LINEAR")
+        val overPlan = File(over.parentFile, "pin-over.plan.json").readText()
+        assertContains(overPlan, "\"law\": \"LINEAR\"")
+        assertContains(overPlan, "\"fadeSec\": \"3\"")
+    }
+
+    @Test
+    fun `render --strategy of a strategy the planner skipped still uses the pair's pin`() {
+        run(PinCommand(), "set", songs.a.absolutePath, songs.b.absolutePath, "phraseCut", "--set", "tailMs=0")
+        val wav = File(root, "out/pin-forced.wav")
+        // Disabled, so the planner does not rank it and --strategy builds it outside the ranking.
+        run(RenderCommand(), songs.a.absolutePath, songs.b.absolutePath, "-o", wav.absolutePath, "--strategy", "phraseCut", "--set-pref", "disabledStrategies=phraseCut")
+        val plan = File(wav.parentFile, "pin-forced.plan.json").readText()
+        assertContains(plan, "\"strategyId\": \"phraseCut\"")
+        assertContains(plan, "\"tailMs\": \"0\"")
+    }
+
+    @Test
+    fun `sweep keeps the pair's pin under the swept values`() {
+        run(PinCommand(), "set", songs.a.absolutePath, songs.b.absolutePath, "crossfade", "--preset", "quick-crossfade")
+        val out = File(root, "out/pin-sweep")
+        run(SweepCommand(), songs.a.absolutePath, songs.b.absolutePath, "--strategy", "crossfade", "--param", "alignToBeat=0:1:2", "-o", out.absolutePath)
+        val csv = File(out, "sweep.csv").readLines()
+        val col = csv.first().split(',').indexOf("seconds")
+        assertTrue(col >= 0, csv.first())
+        val seconds = csv.drop(1).map { it.split(',')[col].toDouble() }
+        assertEquals(2, seconds.size, csv.toString())
+        // quick-crossfade is 3 s; the default fade is 6 s. The segment is the fade plus a few milliseconds of guard.
+        for (s in seconds) assertTrue(s < 4.0, "segment of $s s: the pin's fadeSec=3 was dropped (${csv.joinToString(" | ")})")
     }
 
     // ---- ratings --------------------------------------------------------------------------------------------

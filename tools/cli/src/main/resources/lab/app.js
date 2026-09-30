@@ -91,7 +91,9 @@
     laneOff: new Set(),
     busy: false,
     recipeVars: [],
-    blind: null,             // {blindId, labels}
+    editingUserRecipe: null, // id of the user recipe loaded into (or last saved from) the editor
+    pendingRecipeText: null, // the text waiting for "Replace it" after a save conflict
+    blind: null,            // {blindId, labels}
     sweep: null,             // last sweep result
   };
 
@@ -716,7 +718,9 @@
   async function loadRecipe() {
     const id = $('recipe-source').value;
     const r = id ? await api('GET', `/api/recipes/text/${encodeURIComponent(id)}`) : await api('GET', '/api/recipes/template');
+    hideRecipeConflict();
     $('recipe-text').value = r.text;
+    state.editingUserRecipe = r.origin === 'user' ? r.id : null;
     updateCursor();
     await validateRecipe();
   }
@@ -859,16 +863,60 @@
     setStatus(`Rendered the unsaved recipe ${v.strategy} — ${result.worst}.`);
   }
 
-  async function saveRecipe() {
-    const r = await api('POST', '/api/recipes/save', { text: recipeText() });
+  /**
+   * Saves the editor's text. When one of the user's recipes already has its id, the server writes nothing and
+   * answers with a conflict; the page then asks (Replace it / Cancel) and only a confirmed replace is sent with
+   * `replace: true`. Re-saving the user recipe that was loaded into the editor (same id) replaces it without asking.
+   */
+  async function saveRecipe(confirmed) {
+    hideRecipeConflict();
+    const text = typeof confirmed === 'string' ? confirmed : recipeText();
+    const body = { text };
+    if (typeof confirmed === 'string') body.replace = true;
+    else {
+      const id = recipeIdOf(text);
+      if (id !== null && id === state.editingUserRecipe) body.replace = true;
+    }
+    const r = await api('POST', '/api/recipes/save', body);
+    if (!r.ok && r.conflict) {
+      showRecipeConflict(r, text);
+      return;
+    }
     if (!r.ok) {
       await validateRecipe();
       throw new Error(`Not saved: ${(r.problems.find((p) => p.severity === 'error') || { text: 'the recipe has errors' }).text}`);
     }
+    state.editingUserRecipe = recipeIdOf(text);
     await loadStrategies();
     await loadRecipeList();
     await replan();
     setStatus(`Saved to ${r.file}; ${r.strategy} is now a strategy${r.available ? '' : ' (but it is not available — see the warnings)'}.`);
+  }
+
+  /** The recipe id in [text], or null when the text is not a JSON object with a string id. */
+  function recipeIdOf(text) {
+    try {
+      const o = JSON.parse(text);
+      return o && typeof o.id === 'string' ? o.id : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function showRecipeConflict(r, text) {
+    state.pendingRecipeText = text;
+    const where = r.existingFile ? ` (${r.existingFile})` : '';
+    $('recipe-conflict-text').textContent =
+      `Your recipes already have one with the id “${r.id}”: “${r.existingName}”${where}. Replace it with the recipe in the editor? ` +
+      'To keep both, cancel and change the "id".';
+    $('recipe-conflict').hidden = false;
+    $('recipe-conflict-cancel').focus();
+    setStatus(`Not saved yet: “${r.id}” is already one of your recipes.`);
+  }
+
+  function hideRecipeConflict() {
+    state.pendingRecipeText = null;
+    $('recipe-conflict').hidden = true;
   }
 
   // ---- blind test -----------------------------------------------------------------------------------------------------------
@@ -1236,8 +1284,19 @@
     $('recipe-load').addEventListener('click', guard(loadRecipe));
     $('recipe-validate').addEventListener('click', guard(validateRecipe));
     $('recipe-render').addEventListener('click', guard(renderRecipe));
-    $('recipe-save').addEventListener('click', guard(saveRecipe));
+    $('recipe-save').addEventListener('click', guard(() => saveRecipe()));
+    $('recipe-conflict-replace').addEventListener('click', guard(() => {
+      const text = state.pendingRecipeText;
+      if (text === null || text === undefined) { hideRecipeConflict(); return undefined; }
+      return saveRecipe(text);
+    }));
+    $('recipe-conflict-cancel').addEventListener('click', () => {
+      hideRecipeConflict();
+      setStatus('Not saved. Change the "id" in the recipe to keep both.');
+      $('recipe-save').focus();
+    });
     const ta = $('recipe-text');
+    ta.addEventListener('input', hideRecipeConflict);
     ta.addEventListener('input', debounce(guard(validateRecipe), 600));
     for (const ev of ['keyup', 'click', 'select']) ta.addEventListener(ev, updateCursor);
     ta.addEventListener('keydown', (e) => {

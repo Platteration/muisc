@@ -9,9 +9,10 @@ import java.nio.charset.StandardCharsets
 
 /**
  * Runs one command tree in-process, the way [Cli.run] runs the whole `muisc` binary, and returns what it printed.
- * Used for `eval` and `bench`, which are not in [allCommands] yet (the lead registers new commands), so the tests
- * do not depend on that registration. `--cache-dir` and `--profile-dir` under [root] are appended, so the tests
- * never touch the developer's `~/.muisc`; they land on the innermost subcommand, which is the one that takes them.
+ * Used to test a command (such as `eval` and `bench`) on its own, built directly rather than looked up under the
+ * root; that they are registered in [allCommands] is checked through the real root by CliSmokeTest. `--cache-dir`
+ * and `--profile-dir` under [root] are appended, so the tests never touch the developer's `~/.muisc`; they land on
+ * the innermost subcommand, which is the one that takes them.
  */
 internal fun runStandalone(command: CliktCommand, root: File, vararg args: String): String {
     val captured = ByteArrayOutputStream()

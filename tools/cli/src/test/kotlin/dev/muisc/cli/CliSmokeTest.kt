@@ -1,6 +1,9 @@
 package dev.muisc.cli
 
 import com.github.ajalt.clikt.core.CliktError
+import com.github.ajalt.clikt.core.PrintHelpMessage
+import com.github.ajalt.clikt.core.parse
+import com.github.ajalt.clikt.core.subcommands
 import dev.muisc.audio.WavIo
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
@@ -479,5 +482,35 @@ class CliSmokeTest {
         run("analyze", songs.d.absolutePath)
         val after = cache.listFiles()!!.filter { it.isFile }.map { it.lastModified() to it.length() }
         assertEquals(before.toSet(), after.toSet(), "the second analysis rewrote the cache")
+    }
+
+    // ---- the real root ---------------------------------------------------------------------------------------
+
+    /**
+     * The customization, evaluation and Lab commands are tested elsewhere by building them directly; this checks
+     * they are also reachable in the binary: registered under the `muisc` root that `main` builds, each answering
+     * `muisc <cmd> --help`.
+     */
+    @Test
+    fun `the root registers eval, bench, recipe, preset, style, pin, rate and lab and each answers --help`() {
+        val expected = listOf("eval", "bench", "recipe", "preset", "style", "pin", "rate", "lab")
+        val names = Muisc().subcommands(allCommands()).registeredSubcommands().map { it.commandName }
+        assertEquals(names.distinct(), names, "a command name is registered twice")
+        val missing = expected.filter { it !in names }
+        assertTrue(missing.isEmpty(), "not registered under the root: $missing (registered: $names)")
+        for (cmd in expected) {
+            val help = assertFailsWith<PrintHelpMessage>("muisc $cmd --help") { Muisc().subcommands(allCommands()).parse(listOf(cmd, "--help")) }
+            assertEquals(0, help.statusCode, "muisc $cmd --help")
+            val shown = help.context!!.command
+            assertEquals(cmd, shown.commandName)
+            assertContains(shown.getFormattedHelp() ?: "", "Usage: muisc $cmd", message = "muisc $cmd --help")
+        }
+        // The cheap ones also run end to end through Cli.run (the same root) on the test's private profile. (`recipe`
+        // takes --recipes-dir rather than the shared --cache-dir/--profile-dir that Cli.run appends; RecipeCommandTest
+        // runs it.)
+        assertContains(run("style", "list"), "club")
+        assertContains(run("preset", "list"), "quick-crossfade")
+        assertContains(run("pin", "list"), "no pins")
+        assertContains(run("rate", "show"), "no ratings yet")
     }
 }

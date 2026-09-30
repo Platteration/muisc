@@ -120,6 +120,13 @@
         <button id="recipe-save" type="button">Save to my recipes</button>
         <span id="recipe-summary" class="small" role="status"></span>
       </div>
+      <div id="recipe-conflict" class="conflict" role="alertdialog" aria-labelledby="recipe-conflict-text" hidden>
+        <p id="recipe-conflict-text"></p>
+        <div class="row">
+          <button id="recipe-conflict-replace" type="button">Replace it</button>
+          <button id="recipe-conflict-cancel" type="button">Cancel</button>
+        </div>
+      </div>
       <ul id="recipe-problems" class="problems"></ul>
       <h3>Knobs</h3>
       <form id="recipe-vars" class="params" novalidate></form>

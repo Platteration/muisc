@@ -16,6 +16,7 @@ import dev.muisc.cli.lab.LabServer
 import java.net.BindException
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * `muisc lab [FILES|DIRS...] [--fixtures] [--port N]` — the Transition Lab: a local web page for designing, tuning
@@ -31,14 +32,33 @@ class LabCommand : MuiscCommand("lab") {
 
     override fun execute(ctx: CliContext) {
         val sessionDir = Files.createTempDirectory("muisc-lab-").toFile()
-        val lab = LabContext(ctx, sessionDir)
-        val server = try {
-            LabServer(lab, port)
-        } catch (e: BindException) {
-            lab.close()
-            throw CliktError("port $port is in use (another Lab running?). Try --port 0 for a free one.")
+        // What the shutdown hook closes; set as each part is built. (Volatile: the hook runs on another thread.)
+        val opened = object {
+            @Volatile var lab: LabContext? = null
+            @Volatile var server: LabServer? = null
         }
+        val closed = AtomicBoolean(false)
+        val stop = CountDownLatch(1)
+        // Idempotent: run by the shutdown hook (Ctrl-C, SIGTERM) or by the failure path below, whichever comes first.
+        val shutdown = {
+            if (closed.compareAndSet(false, true)) {
+                opened.server?.close()
+                opened.lab?.close()
+                sessionDir.deleteRecursively() // also when the LabContext was never built
+            }
+            stop.countDown()
+        }
+        // Registered before anything is written into the session directory: writing the fixtures and analysing a
+        // folder can take minutes, and Ctrl-C during that must delete the directory too.
+        val hook = Thread { shutdown() }
+        Runtime.getRuntime().addShutdownHook(hook)
         try {
+            val lab = LabContext(ctx, sessionDir).also { opened.lab = it }
+            val server = try {
+                LabServer(lab, port).also { opened.server = it }
+            } catch (e: BindException) {
+                throw CliktError("port $port is in use (another Lab running?). Try --port 0 for a free one.")
+            }
             if (fixtures) {
                 echo("writing and analysing the fixture songs…")
                 for (t in lab.addFixtures()) echo("  ${t.id}  ${t.file.name}")
@@ -56,17 +76,14 @@ class LabCommand : MuiscCommand("lab") {
             echo("")
             echo("Transition Lab: ${server.url}")
             echo("(loopback only; renders go to ${lab.renderDir.path} and are deleted when you stop the Lab with Ctrl-C)")
-            val stop = CountDownLatch(1)
-            val hook = Thread {
-                server.close()
-                lab.close()
-                stop.countDown()
-            }
-            Runtime.getRuntime().addShutdownHook(hook)
             stop.await()
         } catch (e: Exception) {
-            server.close()
-            lab.close()
+            try {
+                Runtime.getRuntime().removeShutdownHook(hook)
+            } catch (_: IllegalStateException) {
+                // The JVM is already shutting down, so the hook is running; shutdown() below is then a no-op.
+            }
+            shutdown()
             throw e
         }
     }

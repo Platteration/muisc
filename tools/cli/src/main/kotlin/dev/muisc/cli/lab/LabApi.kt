@@ -144,8 +144,16 @@ class LabApi(
         }
     }
 
-    fun recipeTemplate(): JsonObject = buildJsonObject {
-        put("text", RecipeCodec.encode(RecipeLibrary.starter("my-transition", "My transition")))
+    /**
+     * A starter recipe under an id nothing uses yet (`my-transition`, `my-transition-2`, ...): no built-in or user
+     * recipe and no file in the recipes folder, so saving a second blank template never lands on the first one.
+     */
+    fun recipeTemplate(): JsonObject {
+        val taken = RecipeLibrary(lab.recipesDir).load().entries.map { it.id }.toSet() +
+            lab.recipesDir.list().orEmpty().filter { it.endsWith(".json") }.map { it.removeSuffix(".json") }
+        return buildJsonObject {
+            put("text", RecipeCodec.encode(RecipeLibrary.starter(freeId(TEMPLATE_ID, taken), "My transition")))
+        }
     }
 
     /** Parse + validate: every problem with its severity, path, line and column, and the knobs for the sliders. */
@@ -225,7 +233,16 @@ class LabApi(
         }
     }
 
-    /** Saves to the user's recipe folder (refused while it has errors) and reloads the registry. */
+    /**
+     * Saves to the user's recipe folder (refused while it has errors) and reloads the registry.
+     *
+     * When one of the user's recipes already has this id, nothing is written unless the request says
+     * `"replace": true`: the answer is `{"ok": false, "conflict": true, "id", "existingName", "existingFile"}` and the
+     * page asks the user whether to replace it. (Taking the id of a built-in recipe is not a conflict: the built-in
+     * is not touched, and validation already notes that the saved one replaces it while it is in the folder.)
+     * Synchronized so two requests (four HTTP threads) cannot both pass the check and then write the same id.
+     */
+    @Synchronized
     fun saveRecipe(body: JsonObject): JsonObject {
         val text = body["text"]?.primitiveContent() ?: throw LabError(400, "'text' is required")
         val parsed = RecipeCodec.parse(text)
@@ -234,7 +251,19 @@ class LabApi(
                 put("ok", false)
                 putJsonArray("problems") { for (p in parsed.problems) add(problem(p)) }
             }
-        val result = RecipeLibrary(lab.recipesDir, RecipeValidator(lab.registry.modifierIds.toSet())).save(recipe)
+        val library = RecipeLibrary(lab.recipesDir, RecipeValidator(lab.registry.modifierIds.toSet()))
+        if (body.bool("replace") != true) {
+            val existing = library.load().all(recipe.id).firstOrNull { it.origin == RecipeOrigin.USER }
+            if (existing != null) return buildJsonObject {
+                put("ok", false)
+                put("conflict", true)
+                put("id", recipe.id)
+                put("existingName", existing.recipe.name)
+                existing.file?.let { put("existingFile", it.path) }
+                putJsonArray("problems") { }
+            }
+        }
+        val result = library.save(recipe)
         if (result.ok) lab.reloadRecipes()
         return buildJsonObject {
             put("ok", result.ok)
@@ -544,6 +573,15 @@ class LabApi(
 
     companion object {
         val BLIND_LABELS = listOf("X", "Y", "Z", "W")
+        const val TEMPLATE_ID = "my-transition"
+
+        /** [wanted] when it is not in [taken], else `wanted-2`, `wanted-3`, ... */
+        fun freeId(wanted: String, taken: Set<String>): String {
+            if (wanted !in taken) return wanted
+            var n = 2
+            while ("$wanted-$n" in taken) n++
+            return "$wanted-$n"
+        }
         const val MAX_SWEEP_STEPS = 12
 
         /**
