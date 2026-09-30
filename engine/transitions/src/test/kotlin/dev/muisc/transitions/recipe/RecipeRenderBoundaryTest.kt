@@ -56,6 +56,54 @@ class RecipeRenderBoundaryTest {
         assertWarned("rude none", r)
     }
 
+    /**
+     * The processed decks are entered and left with the same linear guard blends as the built-in beat-domain
+     * strategies: A goes from its dry pre-roll into the processed (here: half-level) signal over
+     * [dev.muisc.transitions.strategies.BeatDomain.SEAM_BLEND_FRAMES] frames, and B from its processed signal into
+     * the dry post-roll over as many frames before it. In `none` mode both decks are unstretched, so the ratio of
+     * the rendered to the dry sample is exactly the blended gain.
+     */
+    @Test
+    fun guardBlendsJoinTheProcessedSignal() {
+        val pair = RecipeRenderTestSupport.far
+        val rec = recipe(
+            "half", RecipeTempo.NONE,
+            DeckRecipe(level = listOf(pt(0, 0.5), pt(3, 0.5), pt(4, 0))),
+            DeckRecipe(level = listOf(pt(0, 0), pt(2, 0.5))),
+            length = 4, hold = 1,
+        )
+        val n = dev.muisc.transitions.strategies.BeatDomain.SEAM_BLEND_FRAMES
+        val g = dev.muisc.transitions.core.Splice.GUARD_FRAMES
+        val aOnly = render(rec, pair, silenceB = true)
+        assertContract("half A", aOnly, boundaryClean = false)
+        assertTrue(aOnly.out.report.warnings.any { it.startsWith("boundary rule: a.level is x0.5 at bar 0") }, aOnly.out.report.warnings.toString())
+        val aDry = aOnly.input.aAudio[0]
+        val aOff = aOnly.plan.aExitOffset
+        var checked = 0
+        for (i in 0 until n) {
+            val d = aDry[aOff + g + i]
+            if (abs(d) < 0.01f) continue
+            val w = (i + 1).toDouble() / (n + 1)
+            assertEquals(1.0 - 0.5 * w, (aOnly.out.audio[0][g + i] / d).toDouble(), 1e-3, "A's head blend at frame $i")
+            checked++
+        }
+        val bOnly = render(rec, pair, silenceA = true)
+        assertContract("half B", bOnly, boundaryClean = false)
+        assertTrue(bOnly.out.report.warnings.any { it.startsWith("boundary rule: b.level is x0.5 at the end of the timeline") }, bOnly.out.report.warnings.toString())
+        val bDry = bOnly.input.bAudio[0]
+        val end = bOnly.plan.expectedOutputFrames - g
+        val bOff = bOnly.plan.bEntryOffset - bOnly.plan.expectedOutputFrames
+        for (i in 0 until n) {
+            val frame = end - n + i
+            val d = bDry[bOff + frame]
+            if (abs(d) < 0.01f) continue
+            val w = (i + 1).toDouble() / (n + 1)
+            assertEquals(0.5 + 0.5 * w, (bOnly.out.audio[0][frame] / d).toDouble(), 1e-3, "B's tail blend at frame $i")
+            checked++
+        }
+        assertTrue(checked > 500, "enough samples compared ($checked)")
+    }
+
     @Test
     fun cleanRecipeHasNoWarnings() {
         val rec = recipe("polite", RecipeTempo.MATCH, DeckRecipe(level = RecipeRenderTestSupport.fadeOutA()), DeckRecipe(level = fadeInB()))
