@@ -54,8 +54,9 @@ internal object RecipeRenderTestSupport {
         val s = RecipeStrategy(recipe)
         val plan = s.plan(pair.a.analysis, pair.b.analysis, pair.features, params, pair.prefs, 1L)
         var input = pair.input(plan)
-        if (stems) input = TransitionInput(plan, input.a, input.b, input.features, input.aAudio, input.bAudio, LazyStemProvider(input.aAudio, input.bAudio, PseudoStemSeparator(), plan.stemNeed))
         if (silenceA || silenceB) input = T.silenced(input, silenceA, silenceB)
+        // Stems are separated from the (possibly silenced) windows, as the renderer's provider would.
+        if (stems) input = TransitionInput(plan, input.a, input.b, input.features, input.aAudio, input.bAudio, LazyStemProvider(input.aAudio, input.bAudio, PseudoStemSeparator(), plan.stemNeed))
         return Rendered(plan, input, s.render(input, RenderContext(pair.prefs, 1L)))
     }
 
