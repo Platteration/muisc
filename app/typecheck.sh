@@ -8,7 +8,7 @@
 # does not prove.
 #
 # Usage:
-#   app/typecheck.sh          # core packages (data, data.db, data.prefs, di, playback, test) -- must be clean
+#   app/typecheck.sh          # core packages (data, data.db, data.prefs, di, playback, ui/viewmodel/AbVote.kt, test) -- must be clean
 #   app/typecheck.sh ui       # core + ui/** + MainActivity/MuiscApplication (best effort, Compose is stubbed)
 #   app/typecheck.sh all      # alias for `ui`
 #   app/typecheck.sh test     # core, then RUNS app/src/test on the JUnit Platform (engine resources on the classpath)
@@ -126,6 +126,9 @@ SRC="$SRC $APP/src/test/kotlin"
 
 if [ "$MODE" = "ui" ] || [ "$MODE" = "all" ]; then
   SRC="$SRC $K/ui $K/MainActivity.kt $K/MuiscApplication.kt"
+else
+  # The blind A/B vote needs no Android or Compose type and app/src/test runs it. (ui/ above already includes it.)
+  SRC="$SRC $K/ui/viewmodel/AbVote.kt"
 fi
 
 if [ "$MODE" = "test" ]; then

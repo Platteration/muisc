@@ -119,6 +119,65 @@ class DjCustomizationTest {
         assertFalse(File(dir, "recipes").exists() && File(dir, "recipes").listFiles().orEmpty().isNotEmpty())
     }
 
+    /** Runs [block], turning anything it throws (a StackOverflowError is an Error) into a test failure that names it. */
+    private fun <T> neverThrows(what: String, block: () -> T): T = try {
+        block()
+    } catch (t: Throwable) {
+        throw AssertionError("$what threw ${t.javaClass.name}", t)
+    }
+
+    /** A 200 KB file that is JSON, nested 100,000 levels deep: well under CustomizationImpl.MAX_IMPORT_BYTES. */
+    private val deeplyNested = "{\"id\": " + "[".repeat(100_000) + "]".repeat(100_000) + "}"
+
+    @Test
+    fun importOfADeeplyNestedFileIsUnreadableNotACrash() {
+        val dir = tempDir()
+        val dj = DjCustomization(dir)
+        dj.reloadRecipes()
+        val outcome = assertIs<RecipeImport.Unreadable>(neverThrows("import") { dj.importRecipeText(deeplyNested) })
+        assertTrue(outcome.problems.any { it.isError }, "problems: ${outcome.problems}")
+        assertFalse(File(dir, "recipes").exists() && File(dir, "recipes").listFiles().orEmpty().isNotEmpty())
+        assertEquals(builtInStrategyCount + builtInRecipeCount, dj.registry.strategies.size)
+    }
+
+    @Test
+    fun importOfARecipeWithADeeplyNestedExpressionIsUnreadableNotACrash() {
+        val dir = tempDir()
+        val dj = DjCustomization(dir)
+        dj.reloadRecipes()
+        val starter = RecipeCodec.encode(RecipeLibrary.starter("deep"))
+        assertTrue("\"bars / 2\"" in starter, starter)
+        val text = starter.replace("\"bars / 2\"", "\"" + "-".repeat(200_000) + "1\"")
+        val outcome = neverThrows("import") { dj.importRecipeText(text, allowErrors = true) }
+        assertIs<RecipeImport.Unreadable>(outcome)
+        assertFalse(File(dir, "recipes/deep.json").exists())
+        assertNull(dj.registry.strategy("recipe:deep"))
+    }
+
+    @Test
+    fun aDeeplyNestedFileInTheRecipesFolderNeverCrashesImportDuplicateOrDelete() {
+        val dir = tempDir()
+        File(dir, "recipes").mkdirs()
+        File(dir, "recipes/deep.json").writeText(deeplyNested)
+        val dj = DjCustomization(dir)
+        neverThrows("reload") { dj.reloadRecipes() }
+        assertTrue(dj.problems().isNotEmpty(), "the unreadable file must be reported")
+
+        // Whether the library skips the file (imported) or cannot be read past it (failed), nothing throws, and a
+        // failed import writes nothing.
+        val outcome = neverThrows("import") { dj.importRecipeText(RecipeCodec.encode(RecipeLibrary.starter("mine"))) }
+        when (outcome) {
+            is RecipeImport.Imported -> assertTrue(File(dir, "recipes/mine.json").isFile)
+            is RecipeImport.Failed -> assertFalse(File(dir, "recipes/mine.json").exists(), "failed, but wrote the file")
+            else -> throw AssertionError("unexpected outcome $outcome")
+        }
+        val copied = neverThrows("duplicate") { dj.duplicateRecipe("smooth-blend") }
+        if (!copied.ok) assertTrue(copied.problems.any { it.isError }, "a failed copy must say why")
+        val deleted = neverThrows("delete") { dj.deleteRecipe("mine") }
+        if (!deleted.ok) assertTrue(deleted.problems.any { it.isError }, "a failed delete must say why")
+        assertTrue(File(dir, "recipes/deep.json").isFile, "the user's file is never removed")
+    }
+
     @Test
     fun aRecipeWithErrorsIsOnlyImportedWhenAllowedAndIsNeverUsed() {
         val dir = tempDir()
@@ -300,6 +359,35 @@ class DjCustomizationTest {
         assertEquals(2, DjCustomization(dir).presets().count { !dj.isBuiltInPreset(it.id) })
         assertFailsWith<IllegalArgumentException> { dj.deletePreset("tight-bass-swap") }
         assertTrue(dj.deletePreset("tight-swap"))
+    }
+
+    @Test
+    fun savingAPresetOverAnUnreadableHandEditedFileKeepsTheUsersBytes() {
+        // A typo in a key ("parms") and a file that is not JSON at all: both are skipped when presets are listed,
+        // so their id looks free to savePreset. The user's text must survive the save.
+        val unreadable = listOf(
+            "{\n  \"id\": \"tight-swap\",\n  \"name\": \"Tight swap\",\n  \"strategyId\": \"bassSwap\",\n  \"parms\": { \"overlapBars\": \"4\" }\n}\n",
+            "{ \"id\": \"tight-swap\", \"name\": ",
+        )
+        for (original in unreadable) {
+            val dir = tempDir()
+            val file = File(dir, "presets/tight-swap.json")
+            file.parentFile.mkdirs()
+            file.writeText(original)
+            val dj = DjCustomization(dir)
+            assertTrue(dj.presets().none { it.id == "tight-swap" }, "the unreadable file must not be listed")
+
+            val saved = dj.savePreset("Tight swap", dj.registry.strategy("bassSwap")!!, Params(mapOf("overlapBars" to "8")))
+
+            assertEquals(saved, DjCustomization(dir).preset(saved.id), "the new preset must be readable")
+            if (saved.id == "tight-swap") {
+                val kept = File(dir, "presets/tight-swap.json.corrupt")
+                assertTrue(kept.isFile, "the user's unreadable tight-swap.json was overwritten without a copy")
+                assertEquals(original, kept.readText())
+            } else {
+                assertEquals(original, file.readText(), "the user's file must be left alone")
+            }
+        }
     }
 
     @Test

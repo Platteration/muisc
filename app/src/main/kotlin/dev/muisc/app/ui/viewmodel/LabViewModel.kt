@@ -59,35 +59,6 @@ data class LabUiState(
     val busy: Boolean get() = analysing || planning || rendering
 }
 
-/**
- * A blind comparison of two candidates for the pair: both are rendered, played under the neutral labels X and Y
- * (which one is X is decided by a coin toss), and the vote becomes a rating — up for the winner, down for the
- * other — recorded in the learned preferences. The names are revealed only after the vote.
- */
-data class AbTest(
-    val first: PlanCandidate,
-    val second: PlanCandidate,
-    /** True when X is [first]. */
-    val xIsFirst: Boolean,
-    val renderX: RenderedTransition? = null,
-    val renderY: RenderedTransition? = null,
-    val rendering: Boolean = true,
-    val progress: LabProgress? = null,
-    /** 'X' or 'Y' while one is playing. */
-    val playing: Char? = null,
-    val position: Float = 0f,
-    val heardX: Boolean = false,
-    val heardY: Boolean = false,
-    /** Set once the vote is in: what X and Y were, and what was recorded. */
-    val reveal: String? = null,
-    val error: String? = null,
-) {
-    val x: PlanCandidate get() = if (xIsFirst) first else second
-    val y: PlanCandidate get() = if (xIsFirst) second else first
-    val ready: Boolean get() = renderX != null && renderY != null
-    val canVote: Boolean get() = ready && heardX && heardY && reveal == null
-}
-
 class LabViewModel(private val repo: LibraryRepository) : ViewModel() {
 
     private val lab: TransitionLabApi get() = AppGraph.lab
@@ -366,7 +337,7 @@ class LabViewModel(private val repo: LibraryRepository) : ViewModel() {
 
     /**
      * The vote: [winner] 'X' or 'Y' records up for it and down for the other; null ("no preference") records
-     * nothing. Either way the names are revealed.
+     * nothing. Once per test: see [castAbVote] for a second tap, a failed rating and what is revealed.
      */
     fun voteAb(winner: Char?) {
         val s = _state.value
@@ -375,19 +346,7 @@ class LabViewModel(private val repo: LibraryRepository) : ViewModel() {
         val test = s.ab ?: return
         if (!test.canVote) return
         stopAudition()
-        viewModelScope.launch {
-            val names = "X was ${test.x.strategy.displayName}, Y was ${test.y.strategy.displayName}."
-            val recorded = if (winner == null) {
-                "No preference — nothing recorded."
-            } else {
-                val (win, lose) = if (winner == 'X') test.x to test.y else test.y to test.x
-                val up = customization.rate(a, b, win.strategy.id, Rating.Up)
-                val down = customization.rate(a, b, lose.strategy.id, Rating.Down)
-                if (up.ok && down.ok) "Recorded: ${win.strategy.displayName} up, ${lose.strategy.displayName} down."
-                else "Could not record the vote: " + listOf(up, down).first { !it.ok }.message
-            }
-            _state.update { st -> st.copy(ab = st.ab?.copy(reveal = "$names $recorded")) }
-        }
+        castAbVote(_state, { it.ab }, { st, t -> st.copy(ab = t) }, viewModelScope, customization, a, b, winner)
     }
 
     fun closeAb() {

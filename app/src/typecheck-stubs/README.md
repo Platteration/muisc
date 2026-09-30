@@ -13,7 +13,7 @@ icons), Media3 (common + session), Coil 2 and the two Guava types Media3 exposes
 Run it with [`app/typecheck.sh`](../../typecheck.sh):
 
 ```
-app/typecheck.sh          # data, data.db, data.prefs, di, playback + app/src/test  -> must be clean
+app/typecheck.sh          # data, data.db, data.prefs, di, playback, ui/viewmodel/AbVote.kt + app/src/test -> must be clean
 app/typecheck.sh ui       # the above plus ui/**, MainActivity, MuiscApplication    -> best effort
 app/typecheck.sh test     # core, then RUNS app/src/test on the JUnit Platform       -> must pass
 ```
@@ -83,7 +83,7 @@ Read this list before trusting a green run.
    run with `app/typecheck.sh test` (see `docs/ANDROID_BUILD_NOTES.md`), but no Android behaviour is
    exercised: a test class that touched a stubbed Android API would run the stub, so the tests are kept to
    code that needs none (`FolderTree`, `GaplessTagParser`, `QueueManager` ids, `DjCustomization`, the
-   coordinator re-plan).
+   coordinator re-plan, the Lab's blind A/B vote in `ui/viewmodel/AbVote.kt`; `LabViewModel` itself is not run).
 
 ## Maintaining the stubs
 
