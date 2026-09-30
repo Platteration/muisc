@@ -21,6 +21,9 @@ import dev.muisc.dsp.stems.PseudoStemSeparator
 import dev.muisc.player.JvmEngineStreamFactory
 import dev.muisc.transitions.DefaultPairAnalyzer
 import dev.muisc.transitions.DefaultStrategyRegistry
+import dev.muisc.transitions.recipe.RecipeCatalog
+import dev.muisc.transitions.recipe.RecipeLibrary
+import dev.muisc.transitions.recipe.RecipeSet
 import dev.muisc.transitions.DefaultTransitionRenderer
 import dev.muisc.transitions.PairFeatures
 import dev.muisc.transitions.TrackRef
@@ -66,7 +69,16 @@ class CliContext(
         engineSampleRate = prefs.sampleRate,
         channels = prefs.channels,
     )
-    val registry: DefaultStrategyRegistry = DefaultStrategyRegistry.default()
+    /** Built-in recipes plus the user's own from `<profile>/recipes`; a broken user recipe is reported and skipped. */
+    val recipeSet: RecipeSet = RecipeLibrary(profile?.let { recipesDir(it.dir) }).load()
+    private val recipeCatalog: RecipeCatalog.Result = RecipeCatalog.build(DefaultStrategyRegistry.default(), recipeSet)
+
+    /** The 14 built-in strategies followed by one `recipe:<id>` strategy per usable recipe. */
+    val registry: DefaultStrategyRegistry = recipeCatalog.registry
+
+    /** Recipe problems worth telling the user about: errors in recipe files and recipes left out of the registry. */
+    val recipeWarnings: List<String> = recipeSet.errors.map { "recipe $it" } +
+        recipeCatalog.skipped.map { (id, why) -> "recipe '$id' is not available: $why" }
     val pairAnalyzer: DefaultPairAnalyzer = DefaultPairAnalyzer()
     val customization: PlannerCustomization = profile?.customization(sessionPin(preset)) ?: PlannerCustomization.NONE
     val planner: DefaultTransitionPlanner = DefaultTransitionPlanner(registry, pairAnalyzer, customization = customization)
@@ -122,6 +134,9 @@ class CliContext(
         }
 
         /** `--profile-dir` ← `MUISC_HOME` ← `~/.muisc` (holds `presets/`, `styles/`, `pins.json`, `feedback.json`). */
+        /** Where user recipes live inside a profile directory. */
+        fun recipesDir(profileDir: File): File = File(profileDir, "recipes")
+
         fun defaultProfileDir(explicit: File?, env: (String) -> String? = System::getenv): File {
             explicit?.let { return it }
             env("MUISC_HOME")?.takeIf { it.isNotBlank() }?.let { return File(it) }
@@ -173,6 +188,7 @@ abstract class MuiscCommand(name: String) : CliktCommand(name = name) {
         // (render --set, forced strategies) sees the same values as the planner.
         val prefs = PresetResolution.fold(resolved, profile.presetLookup, preset)
         CliContext(prefs, CliContext.defaultCacheDir(cacheDirOpt), profile, preset).use { ctx ->
+            for (w in ctx.recipeWarnings) echo("warning: $w", err = true)
             if (preset != null && ctx.registry.strategy(preset.strategyId) == null) {
                 throw CliktError("preset '${preset.id}' is for strategy '${preset.strategyId}', which is not registered. Known: ${ctx.registry.strategyIds.joinToString(", ")}")
             }

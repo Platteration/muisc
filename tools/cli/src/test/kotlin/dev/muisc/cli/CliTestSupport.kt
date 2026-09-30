@@ -25,7 +25,12 @@ object Cli {
         System.setOut(stream)
         System.setErr(stream)
         try {
-            command.parse(args.toList() + listOf("--cache-dir", cacheDir.absolutePath))
+            // A private profile directory next to the cache, so the tests never read the developer's ~/.muisc
+            // (its pins, ratings or recipes would change what the planner picks).
+            // Tests that pass their own --profile-dir keep it (clikt takes the last occurrence, so never append a second).
+            val profileDir = File(cacheDir.absoluteFile.parentFile, cacheDir.name + "-profile")
+            val profileArgs = if ("--profile-dir" in args) emptyList() else listOf("--profile-dir", profileDir.absolutePath)
+            command.parse(args.toList() + listOf("--cache-dir", cacheDir.absolutePath) + profileArgs)
         } finally {
             stream.flush()
             System.setOut(previousOut)

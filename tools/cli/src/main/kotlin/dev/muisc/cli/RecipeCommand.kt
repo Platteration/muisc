@@ -52,10 +52,10 @@ class RecipeCommand : CliktCommand(name = "recipe") {
 
 /** Options shared by the `recipe` subcommands. */
 abstract class RecipeSubcommand(name: String) : CliktCommand(name = name) {
-    protected val recipesDir by option("--recipes-dir", metavar = "DIR", help = "User recipe directory (default ~/.muisc/recipes).")
+    protected val recipesDir by option("--recipes-dir", metavar = "DIR", help = "User recipe directory (default \$MUISC_HOME/recipes or ~/.muisc/recipes).")
         .file(canBeFile = false)
 
-    protected val userDir: File get() = recipesDir ?: RecipeLibrary.defaultUserDir()
+    protected val userDir: File get() = recipesDir ?: CliContext.recipesDir(CliContext.defaultProfileDir(null))
     protected fun library(): RecipeLibrary = RecipeLibrary(userDir)
 
     /**

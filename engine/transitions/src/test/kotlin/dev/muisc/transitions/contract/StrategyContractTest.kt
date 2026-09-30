@@ -6,6 +6,8 @@ import dev.muisc.dsp.qa.ArtifactDetector
 import dev.muisc.dsp.stems.PseudoStemSeparator
 import dev.muisc.transitions.DefaultPairAnalyzer
 import dev.muisc.transitions.DefaultStrategyRegistry
+import dev.muisc.transitions.recipe.RecipeCatalog
+import dev.muisc.transitions.recipe.RecipeLibrary
 import dev.muisc.transitions.LazyStemProvider
 import dev.muisc.transitions.Params
 import dev.muisc.transitions.RenderContext
@@ -26,7 +28,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * The strategy contract (DESIGN.md §9), run for every strategy in [DefaultStrategyRegistry.default] over a pair
+ * The strategy contract (DESIGN.md §9), run for every strategy in [DefaultStrategyRegistry.default] and every shipped
+ * recipe over a pair
  * matrix of four 16-bar synthetic tracks (12 ordered pairs). A strategy merged into the registry is covered
  * automatically. For every pair the strategy declares itself applicable to, with default params:
  * the plan is valid, the render's length is within ±1 % of `expectedOutputFrames`, [SpliceCheck] is clean, the
@@ -37,7 +40,8 @@ import kotlin.test.assertTrue
  * selects pairs by name; `-Dmuisc.contract.strategies=crossfade,bassSwap` limits the strategies.
  */
 class StrategyContractTest {
-    private val registry = DefaultStrategyRegistry.default()
+    // The built-in strategies plus every shipped recipe: a recipe is a strategy and must honour the same contract.
+    private val registry = RecipeCatalog.registry(DefaultStrategyRegistry.default(), RecipeLibrary(userDir = null))
     private val loader = SyntheticTrackLoader()
     private val pairAnalyzer = DefaultPairAnalyzer()
 

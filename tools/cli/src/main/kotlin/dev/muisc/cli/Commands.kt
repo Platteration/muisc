@@ -22,4 +22,9 @@ fun allCommands(): List<CliktCommand> = listOf(
     StemsCommand(),      // stems   — pseudo-stem separation to four WAVs
     PlayCommand(),       // play    — play a WAV through the system device
     GoldensCommand.build(), // goldens check|update — golden-render regression
+    RecipeCommand.build(),  // recipe  — list, show, validate, create and plot user-authored transitions
+    PresetCommand(),        // preset  — named parameter sets for a strategy
+    StyleCommand(),         // style   — listening styles that reshape the preferences (--style)
+    PinCommand(),           // pin     — always use a chosen transition for a pair of tracks
+    RateCommand(),          // rate    — thumbs up/down that the planner learns from
 )
