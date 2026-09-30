@@ -89,6 +89,12 @@ class TransitionCoordinatorTest {
         }
     }
 
+    /** A planner whose ranking can change between plans, as when the listener switches style in between. */
+    private class SwitchablePlanner(var candidates: List<PlanCandidate>, val features: PairFeatures) : TransitionPlanner {
+        override fun plan(a: TrackRef, b: TrackRef, prefs: TransitionPrefs, seed: Long, previousStrategyId: String?): RankedPlans =
+            RankedPlans(features, candidates)
+    }
+
     /** Renders by strategy id: a supplied result, or a thrown failure. */
     private class FakeRenderer(val results: Map<String, () -> RenderedTransition>) : TransitionRenderer {
         val calls = ArrayList<String>()
@@ -216,6 +222,40 @@ class TransitionCoordinatorTest {
         assertTrue(coord.transitionLog.any { it.contains("stubFirst") && it.contains("rejected") }, coord.transitionLog.toString())
         assertTrue(coord.transitionLog.any { it.contains("crossfade") && it.contains("failed") }, coord.transitionLog.toString())
         assertTrue(player.commands.snapshot().filterIsInstance<EngineCommand.ReplaceTail>().last().segments.any { it is Segment.Live })
+        coord.shutdown()
+    }
+
+    /**
+     * A pair that comes back into the queue reuses its retained render only while the planner still ranks that
+     * strategy. A strategy the planner has since dropped (a style excluding its technique, say) is not played from
+     * the retained render: the edge is planned and rendered again.
+     */
+    @Test
+    fun aRetainedRenderIsReusedOnlyWhileThePlannerStillRanksItsStrategy() = runTest {
+        val other = StubStrategy("stubOther", plan.copy(strategyId = "stubOther"))
+        val otherCandidate = candidate(other, other.plan(a.analysis, b.analysis, features, Params.EMPTY, prefs, SEED), 0.6)
+        val planner = SwitchablePlanner(listOf(candidate(strategy, plan, 0.8), otherCandidate), features)
+        val renderer = FakeRenderer(mapOf("crossfade" to { rendered }, "stubOther" to { RenderedTransition(rendered.plan.copy(strategyId = "stubOther"), rendered.audio, rendered.markers, rendered.report) }))
+        val coord = coordinator(planner, renderer, FakeLiveFactory(), this)
+
+        coord.onQueue(PlaybackContext.QUEUE, items(a, b), 0)
+        advanceUntilIdle()
+        assertEquals(CoordinatorState.Ready("crossfade"), coord.state.value[0])
+
+        // B leaves the queue and comes back: still ranked, so the retained render is reused without rendering.
+        coord.onQueue(PlaybackContext.QUEUE, items(a), 0); advanceUntilIdle()
+        coord.onQueue(PlaybackContext.QUEUE, items(a, b), 0); advanceUntilIdle()
+        assertEquals(CoordinatorState.Ready("crossfade"), coord.state.value[0])
+        assertEquals(listOf("crossfade"), renderer.calls)
+        assertEquals(1, coord.transitionLog.count { it.contains("reusing retained crossfade") }, coord.transitionLog.toString())
+
+        // The planner no longer ranks crossfade: the retained render must not come back.
+        coord.onQueue(PlaybackContext.QUEUE, items(a), 0); advanceUntilIdle()
+        planner.candidates = listOf(otherCandidate)
+        coord.onQueue(PlaybackContext.QUEUE, items(a, b), 0); advanceUntilIdle()
+        assertEquals(CoordinatorState.Ready("stubOther"), coord.state.value[0], coord.transitionLog.toString())
+        assertEquals(listOf("crossfade", "stubOther"), renderer.calls)
+        assertEquals(1, coord.transitionLog.count { it.contains("reusing retained") }, coord.transitionLog.toString())
         coord.shutdown()
     }
 

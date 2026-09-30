@@ -291,7 +291,10 @@ class TransitionCoordinator(
         e.ranked = ranked
         e.candidatePos = 0
         retained[key]?.let { r ->
-            if (r.plan.strategyId !in prefs.disabledStrategies && allowedByPower(r.plan.strategyId)) {
+            // Only while the planner still ranks that strategy: a style may have excluded it since it was rendered.
+            if (r.plan.strategyId !in prefs.disabledStrategies && allowedByPower(r.plan.strategyId) &&
+                ranked.candidates.any { it.strategy.id == r.plan.strategyId }
+            ) {
                 e.rendered = r
                 e.state = CoordinatorState.Ready(r.plan.strategyId)
                 log("edge ${e.index}: reusing retained ${r.plan.strategyId} render")

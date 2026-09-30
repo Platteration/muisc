@@ -34,3 +34,23 @@ pre-approved; anything else needs a one-line request below and the lead's approv
   they did under the old keys. Analyses cached before the change have no `contentHash` and keep the old keys.
 - Recipe format (`dev.muisc.transitions.recipe`), `sdk.StrategyTraits`, and the customization package
   (`dev.muisc.transitions.custom`) added; `TransitionPrefs.activePresets` (defaulted, additive).
+- `TransitionPrefs.excludedTechniques: Set<Technique> = emptySet()` (defaulted, additive; a missing key decodes to
+  empty). New `sdk.Technique` (echo, reverb, filter, stems, tempoGlide, generated) and
+  `StrategyTraits.techniques(params, beatsPerBar)` (default null: "not declared"). The planner skips a strategy that
+  declares an excluded technique for the params it would use. `RecipeStrategy` declares them from the resolved
+  recipe; built-in strategies declare none and are still excluded by id. Style files gain an `exclude` key.
+- The live ladder (`DefaultLivePlanFactory`) now obeys `disabledStrategies` and `excludedTechniques`: a rung that is
+  disabled, or would use an excluded technique (`echoOut` echo, `filterSweep` filter, `bassSwap` tempo glide when B
+  has to be nudged), is skipped. Crossfade is never skipped. Behaviour change: under the purist style, or with those
+  strategies disabled, a skip or a missed deadline now falls back to a phrase cut or a crossfade.
+- `TransitionCoordinator` reuses a retained render only while the planner still ranks its strategy.
+- `FileFeedbackStore` and `FilePinStore` re-read their file under an inter-process lock before each write and write
+  atomically; a hidden `.<file>.lock` is created next to each. A running store sees ratings saved by other
+  processes. `FileFeedbackStore.refresh()` added.
+- Recipes: JSON nested deeper than 64 levels and expressions nested deeper than 64 levels are reported as problems.
+  `RecipeLibrary.save` targets the file in use and refuses while several files hold the id. In match/glide, lanes
+  are evaluated with the bars actually rendered.
+- `ArtifactMetrics` maps source onsets through the beat grids for renders that publish `masterBeat`, so a kick that
+  both sources play is no longer reported as a level jump (`levelJumpDb` on the beat-domain blends drops from
+  24-29 dB to 5-14 dB on the fixtures). `TempoGlideModifier` fits its glide into the body of `stemSwap` and
+  `drumBreakBridge` (`BeatDomain.PARAM_BODY_BEATS`), which used to render past their windows.

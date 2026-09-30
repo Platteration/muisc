@@ -6,6 +6,7 @@ import dev.muisc.analysis.model.TrackAnalysis
 import dev.muisc.transitions.PairFeatures
 import dev.muisc.transitions.TrackRef
 import dev.muisc.transitions.TransitionPrefs
+import dev.muisc.transitions.sdk.Technique
 import kotlin.math.abs
 import kotlin.math.ceil
 
@@ -32,7 +33,10 @@ import kotlin.math.ceil
  * bars of A's grid, `aToFrame = min(aFromFrame + outputFrames, A.totalFrames)`.
  *
  * Every rung has a room requirement in A (bars left after the planned point); when it is not met the ladder moves
- * on, so a track that is about to end always gets a cut or a crossfade. Deterministic: same inputs, same plan.
+ * on, so a track that is about to end always gets a cut or a crossfade. The ladder also obeys the listener's prefs
+ * the way the planner does: a rung whose strategy id is in `prefs.disabledStrategies`, or that would use one of
+ * `prefs.excludedTechniques` (`echoOut` an echo, `filterSweep` a filter, `bassSwap` a tempo glide when B has to be
+ * nudged), is skipped. The crossfade is never skipped. Deterministic: same inputs, same plan.
  * Malformed analyses (empty grids, zero tempo, frames outside the track, NaN features) are tolerated: any rung whose
  * inputs are unusable is skipped, never thrown from.
  */
@@ -49,6 +53,8 @@ class DefaultLivePlanFactory : LivePlanFactory {
         val cold = intro == IntroType.COLD_START || intro == IntroType.BEAT_INTRO
         val maxOut = (MAX_SEGMENT_SEC.toLong() * sr).coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
         fun sane(frames: Int): Boolean = frames in 1..maxOut
+        fun allowed(id: String, vararg uses: Technique): Boolean =
+            id !in prefs.disabledStrategies && uses.none { it in prefs.excludedTechniques }
 
         val db = grid?.nextDownbeatIndex(now) ?: 0
         val dbFrame = grid?.beatFrame(db) ?: 0L
@@ -56,7 +62,10 @@ class DefaultLivePlanFactory : LivePlanFactory {
         // within the search bound; then nothing can be scheduled on it and the ladder falls through to the crossfade.
         if (grid != null && dbFrame >= now) {
             // 1. bassSwap
-            if (features != null && features.beatMatchable && abs(features.tempoRatio - 1.0) <= MAX_LIVE_TEMPO_DEVIATION) {
+            val nudged = features != null && features.tempoRatio != 1.0
+            if (features != null && features.beatMatchable && abs(features.tempoRatio - 1.0) <= MAX_LIVE_TEMPO_DEVIATION &&
+                allowed("bassSwap", *(if (nudged) arrayOf(Technique.TEMPO_GLIDE) else emptyArray()))
+            ) {
                 val wanted = (prefs.preferredOverlapBars / 4).coerceIn(MIN_BASS_SWAP_BARS, MAX_BASS_SWAP_BARS)
                 val bars = minOf(wanted, grid.barsAvailable(db, wanted))
                 if (bars >= MIN_BASS_SWAP_BARS) {
@@ -72,7 +81,7 @@ class DefaultLivePlanFactory : LivePlanFactory {
             }
 
             // 2. echoOut / filterSweep
-            if (cold) {
+            if (cold && allowed("echoOut", Technique.ECHO)) {
                 val cut = grid.framesBetween(db, db + grid.bpb)
                 if (sane(cut) && dbFrame + cut <= grid.trimEnd) {
                     val beat = grid.framesBetween(db, db + 1).coerceAtLeast(1)
@@ -83,7 +92,7 @@ class DefaultLivePlanFactory : LivePlanFactory {
                     while (!sane(tail) && tailBars > 1) { tailBars--; tail = grid.framesBetween(db + grid.bpb, db + (1 + tailBars) * grid.bpb) }
                     if (sane(tail) && cut.toLong() + tail <= maxOut) return LivePlanBuilders.echoOut(dbFrame, aTotal, bFrom, cut, delay, tail, ECHO_FEEDBACK, ECHO_DAMP_HZ)
                 }
-            } else {
+            } else if (!cold && allowed("filterSweep", Technique.FILTER)) {
                 val wanted = (prefs.preferredOverlapBars / 4).coerceIn(MIN_SWEEP_BARS, MAX_SWEEP_BARS)
                 val bars = minOf(wanted, grid.barsAvailable(db, wanted))
                 if (bars >= MIN_SWEEP_BARS) {
@@ -93,7 +102,7 @@ class DefaultLivePlanFactory : LivePlanFactory {
             }
 
             // 3. phraseCut
-            if (cold) {
+            if (cold && allowed("phraseCut")) {
                 val phrase = grid.beatFrame(grid.nextPhraseIndex(now))
                 val cutFrame = when {
                     phrase >= now && phrase <= grid.trimEnd -> phrase

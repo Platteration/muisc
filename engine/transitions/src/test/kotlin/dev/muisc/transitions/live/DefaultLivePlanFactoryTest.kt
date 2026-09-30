@@ -1,6 +1,9 @@
 package dev.muisc.transitions.live
 
 import dev.muisc.transitions.FadeLaw
+import dev.muisc.transitions.TransitionPrefs
+import dev.muisc.transitions.custom.BuiltInStyles
+import dev.muisc.transitions.sdk.Technique
 import dev.muisc.transitions.live.LiveFixtures.SR
 import dev.muisc.transitions.live.LiveFixtures.a120
 import dev.muisc.transitions.live.LiveFixtures.b121
@@ -106,6 +109,43 @@ class DefaultLivePlanFactoryTest {
         assertTrue(sa.highPass && sa.fromHz < sa.toHz && sa.toFrame == plan.outputFrames, "A high-pass sweeps up over the segment: $sa")
         assertTrue(!sb.highPass && sb.fromHz < sb.toHz && sb.toHz <= 0.45 * SR, "B low-pass opens: $sb")
         assertEquals(bMixInFrame(b140amb), plan.bFromFrame)
+    }
+
+    /**
+     * The live ladder obeys the same prefs as the planner: a rung whose strategy is in `disabledStrategies`, or that
+     * would use an excluded technique (the rate nudge of `bassSwap` is a tempo glide), is skipped for the next one.
+     */
+    @Test
+    fun skipsDisabledRungsAndExcludedTechniques() {
+        val swap = LiveFixtures.features(a120, b121)
+        val swapNow = barFrame(a120, 12) + 1000
+        fun swapKind(p: TransitionPrefs) = factory.plan(a120.trackRef, b121.trackRef, swap, swapNow, p).kind
+        assertEquals("bassSwap", swapKind(prefs))
+        assertTrue(swapKind(prefs.copy(disabledStrategies = setOf("bassSwap"))) != "bassSwap")
+        assertTrue(swapKind(prefs.copy(excludedTechniques = setOf(Technique.TEMPO_GLIDE))) != "bassSwap", "the rate nudge is a tempo glide")
+
+        val cold = LiveFixtures.features(a120, b140cold)
+        val coldNow = barFrame(a120, 20) + 5
+        fun coldKind(p: TransitionPrefs) = factory.plan(a120.trackRef, b140cold.trackRef, cold, coldNow, p).kind
+        assertEquals("echoOut", coldKind(prefs))
+        assertEquals("phraseCut", coldKind(prefs.copy(excludedTechniques = setOf(Technique.ECHO))))
+        assertEquals("phraseCut", coldKind(prefs.copy(disabledStrategies = setOf("echoOut"))))
+        assertEquals("crossfade", coldKind(prefs.copy(disabledStrategies = setOf("echoOut", "phraseCut"))))
+
+        val amb = LiveFixtures.features(a120, b140amb)
+        val ambNow = barFrame(a120, 8)
+        fun ambKind(p: TransitionPrefs) = factory.plan(a120.trackRef, b140amb.trackRef, amb, ambNow, p).kind
+        assertEquals("filterSweep", ambKind(prefs))
+        assertEquals("crossfade", ambKind(prefs.copy(excludedTechniques = setOf(Technique.FILTER))))
+        assertEquals("crossfade", ambKind(prefs.copy(disabledStrategies = setOf("filterSweep"))))
+
+        // The purist style: no effect, filter or glide rung on any of these pairs; the floor is still there.
+        val purist = BuiltInStyles.all.first { it.id == "purist" }.apply(prefs)
+        for ((kind, allowed) in listOf(swapKind(purist) to "?", coldKind(purist) to "phraseCut", ambKind(purist) to "crossfade")) {
+            assertTrue(kind in setOf("phraseCut", "crossfade"), "purist got a live $kind")
+            if (allowed != "?") assertEquals(allowed, kind)
+        }
+        assertEquals("crossfade", factory.plan(a120.trackRef, b121.trackRef, swap, swapNow, purist.copy(disabledStrategies = purist.disabledStrategies + "crossfade" + "phraseCut")).kind, "crossfade is never skipped")
     }
 
     @Test
