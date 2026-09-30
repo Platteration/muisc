@@ -9,6 +9,7 @@ import dev.muisc.transitions.recipe.RecipeRenderTestSupport.outFrame
 import dev.muisc.transitions.recipe.RecipeRenderTestSupport.pt
 import dev.muisc.transitions.recipe.RecipeRenderTestSupport.recipe
 import dev.muisc.transitions.recipe.RecipeRenderTestSupport.render
+import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -106,7 +107,7 @@ class RecipeRenderEffectsTest {
         // Before the send opens the echo adds nothing: bars 1..2 are A untouched.
         val a1 = outFrame(wet, pair, echo, 1.0).toInt()
         var maxDiff = 0f
-        for (i in 0 until 8192) maxDiff = maxOf(maxDiff, kotlin.math.abs(wet.out.audio[0][a1 + i] - dry.out.audio[0][a1 + i]))
+        for (i in 0 until 8192) maxDiff = maxOf(maxDiff, abs(wet.out.audio[0][a1 + i] - dry.out.audio[0][a1 + i]))
         assertEquals(0f, maxDiff, "no echo before the send opens")
     }
 
@@ -142,6 +143,61 @@ class RecipeRenderEffectsTest {
         assertTrue(freeLate < freeEarly - 20.0, "without the freeze the same tail dies (${fmt(freeEarly)} -> ${fmt(freeLate)} dBFS)")
         val released = rms(frozen, 7.75, 8.0)
         assertTrue(released < late - 6.0, "after the freeze is released the tail decays (${fmt(late)} -> ${fmt(released)} dBFS)")
+    }
+
+    /**
+     * An echo send still open when A's overlap ends (bar 3.6, mid-beat): A's pre-fader signal stops there, and the
+     * renderer fades the send feed out over [RecipeRenderer.DECLICK_FRAMES] frames so the delay line never holds a
+     * step that it would repeat. With no feedback, a return of 1 and a whole-frame delay (half a beat = 11025
+     * frames) the echo after A's end is exactly the feed, one delay later, so the fade can be read off the output.
+     */
+    @Test
+    fun sendFeedsAreFadedAtTheDeckEdges() {
+        val pair = RecipeRenderTestSupport.far
+        val rec = recipe(
+            "echo-at-end", RecipeTempo.NONE,
+            DeckRecipe(level = listOf(pt(2, 1), pt(3, 0)), echo = EchoRecipe(send = listOf(pt(2, 0), pt(2.5, 1), pt(5, 1), pt(5.25, 0)), beats = e(0.5), feedback = e(0), returnLevel = e(1))),
+            DeckRecipe(level = listOf(pt(4, 0, RecipeCurve.EQUAL_POWER), pt(6, 1))),
+            length = 3.6, bEntersAt = 5, hold = 2,
+        )
+        val aOnly = render(rec, pair, silenceB = true)
+        assertContract("echo at end", aOnly)
+        val g = dev.muisc.transitions.core.Splice.GUARD_FRAMES
+        val aEnd = g + Math.round(3.6 * 2.0 * RecipeRenderTestSupport.SR).toInt()
+        val delay = RecipeRenderTestSupport.SR / 4
+        val fade = RecipeRenderer.DECLICK_FRAMES
+        val dry = aOnly.input.aAudio[0]
+        val aOff = aOnly.plan.aExitOffset
+        var checked = 0
+        for (i in 0 until fade) {
+            val d = dry[aOff + aEnd - fade + i]
+            if (abs(d) < 0.01f) continue
+            assertEquals((fade - 1 - i).toDouble() / fade, (aOnly.out.audio[0][aEnd + delay - fade + i] / d).toDouble(), 1e-3, "the echo of the feed's last $fade frames, frame $i")
+            checked++
+        }
+        assertTrue(checked > 100, "enough samples compared ($checked)")
+        assertTrue((aEnd + delay until aEnd + delay + 4096).all { aOnly.out.audio[0][it] == 0f }, "nothing after the echo of A's last frame")
+
+        // Likewise a send of B that is open from bar 0 (B cut in mid-intro) starts with a fade-in of its feed.
+        val bRec = recipe(
+            "echo-from-start", RecipeTempo.NONE,
+            DeckRecipe(level = fadeOutA(0, 2)),
+            DeckRecipe(level = listOf(pt(3, 0, RecipeCurve.EQUAL_POWER), pt(5, 1)), echo = EchoRecipe(send = listOf(pt(1, 1), pt(1.25, 0)), beats = e(0.5), feedback = e(0), returnLevel = e(1))),
+            length = 2, bEntersAt = 1.3, hold = 3,
+        )
+        val bOnly = render(bRec, pair, silenceA = true)
+        assertContract("echo from start", bOnly)
+        val bDry = bOnly.input.bAudio[0]
+        val bOff = bOnly.plan.bEntryOffset - bOnly.plan.expectedOutputFrames
+        val fadeIn = RecipeRenderer.FADE_IN_FRAMES
+        var checkedB = 0
+        for (i in 0 until fadeIn) {
+            val d = bDry[bOff + g + i]
+            if (abs(d) < 1e-3f) continue
+            assertEquals(i.toDouble() / fadeIn, (bOnly.out.audio[0][g + delay + i] / d).toDouble(), 1e-3, "the echo of B's first $fadeIn fed frames, frame $i")
+            checkedB++
+        }
+        assertTrue(checkedB > 50, "B has signal where its send opens ($checkedB samples compared)")
     }
 
     /**

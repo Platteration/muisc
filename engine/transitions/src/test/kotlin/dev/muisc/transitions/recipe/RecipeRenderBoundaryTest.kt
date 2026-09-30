@@ -134,6 +134,31 @@ class RecipeRenderBoundaryTest {
         assertTrue((aEnd until aEnd + 4096).all { aOnly.out.audio[0][it] == 0f }, "nothing of A after the overlap")
     }
 
+    /**
+     * A recipe may leave B's level lane empty: B then plays at full level from bar 0, cut in mid-waveform (here in the
+     * middle of B's intro). The renderer fades B in over [RecipeRenderer.FADE_IN_FRAMES] frames so the cut-in is not a step.
+     */
+    @Test
+    fun bCutInAtBarZeroIsDeclicked() {
+        val pair = RecipeRenderTestSupport.far
+        val rec = recipe("cut-in", RecipeTempo.NONE, DeckRecipe(level = RecipeRenderTestSupport.fadeOutA(0, 2)), DeckRecipe(), length = 2, bEntersAt = 1.3, hold = 1)
+        val bOnly = render(rec, pair, silenceA = true)
+        assertContract("cut in", bOnly)
+        val g = dev.muisc.transitions.core.Splice.GUARD_FRAMES
+        val bOff = bOnly.plan.bEntryOffset - bOnly.plan.expectedOutputFrames
+        val dry = bOnly.input.bAudio[0]
+        val n = RecipeRenderer.FADE_IN_FRAMES
+        var checked = 0
+        for (i in 0 until n) {
+            val d = dry[bOff + g + i]
+            if (abs(d) < 1e-3f) continue
+            assertEquals(i.toDouble() / n, (bOnly.out.audio[0][g + i] / d).toDouble(), 1e-3, "B's fade-in at frame $i")
+            checked++
+        }
+        assertTrue(checked > 50, "B has signal where it is cut in ($checked samples compared)")
+        assertEquals(dry[bOff + g + n + 10], bOnly.out.audio[0][g + n + 10], "full level after the fade-in")
+    }
+
     /** A reverb left frozen to the very end is released over the last bar, and nothing of it reaches the post-roll. */
     @Test
     fun effectTailsAreReleasedBeforeThePostRoll() {
