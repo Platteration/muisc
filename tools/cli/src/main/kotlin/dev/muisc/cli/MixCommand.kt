@@ -144,7 +144,7 @@ class MixCommand : MuiscCommand("mix") {
         echoElapsed("mixed ${tracks.size} tracks (${transitions.count { it.result != null }} transitions)")
     }
 
-    private fun key(a: TrackRef, b: TrackRef) = "${a.id} ${b.id}"
+    private fun key(a: TrackRef, b: TrackRef) = "${a.id}\u0000${b.id}"
 
     private fun roomText(room: DefaultProgramBuilder.Room, a: TrackRef, b: TrackRef): String = when (room) {
         DefaultProgramBuilder.Room.FITS -> "fits"
