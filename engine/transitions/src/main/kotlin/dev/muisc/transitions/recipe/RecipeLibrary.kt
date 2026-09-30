@@ -92,8 +92,8 @@ class LibraryResult(val ok: Boolean, val file: File?, val problems: List<RecipeP
  * it writes nothing while more than one file holds the recipe's id.
  *
  * A file nested deeper than [RecipeCodec.MAX_NESTING] levels, or with an expression nested deeper than
- * [Expr.MAX_DEPTH], is reported like any other bad file; a [StackOverflowError] while reading one file is caught
- * and reported for that file too.
+ * [Expr.MAX_DEPTH], is reported like any other bad file. Those two limits bound every recursion in reading and
+ * validating a recipe, so no file can exhaust the stack.
  */
 class RecipeLibrary(
     val userDir: File?,
@@ -257,19 +257,16 @@ class RecipeLibrary(
             val name = raw.substringBefore('#').trim()
             if (name.isEmpty()) continue
             val path = "$resourceDir/$name"
-            guarded(path, problems) {
-                val parsed = try {
-                    classLoader.getResourceAsStream(path)?.use { RecipeCodec.parse(it) }
-                } catch (e: IOException) {
-                    RecipeParseResult(null, listOf(RecipeProblem.error("", "cannot read: ${e.message}")))
-                }
-                if (parsed == null) {
-                    problems += LibraryProblem(path, RecipeProblem.error("", "listed in $INDEX but missing"))
-                    null
-                } else {
-                    entry(parsed, RecipeOrigin.BUILT_IN, path, null, problems)
-                }
-            }?.let { out += it }
+            val parsed = try {
+                classLoader.getResourceAsStream(path)?.use { RecipeCodec.parse(it) }
+            } catch (e: IOException) {
+                RecipeParseResult(null, listOf(RecipeProblem.error("", "cannot read: ${e.message}")))
+            }
+            if (parsed == null) {
+                problems += LibraryProblem(path, RecipeProblem.error("", "listed in $INDEX but missing"))
+                continue
+            }
+            entry(parsed, RecipeOrigin.BUILT_IN, path, null, problems)?.let { out += it }
         }
         return out
     }
@@ -285,7 +282,7 @@ class RecipeLibrary(
             problems += LibraryProblem(dir.path, RecipeProblem.error("", "cannot list the user recipe directory"))
             return emptyList()
         }
-        return files.mapNotNull { f -> guarded(f.path, problems) { entry(RecipeCodec.parse(f), RecipeOrigin.USER, f.path, f, problems) } }
+        return files.mapNotNull { f -> entry(RecipeCodec.parse(f), RecipeOrigin.USER, f.path, f, problems) }
     }
 
     private fun entry(parsed: RecipeParseResult, origin: RecipeOrigin, source: String, file: File?, problems: MutableList<LibraryProblem>): RecipeEntry? {
@@ -305,17 +302,6 @@ class RecipeLibrary(
 
     private fun listJson(dir: File): List<File>? =
         dir.listFiles()?.filter { it.isFile && !it.name.startsWith(".") && it.name.endsWith(SUFFIX, ignoreCase = true) }?.sortedBy { it.name }
-
-    /**
-     * Reads one file with [read]. A [StackOverflowError] (a recursion the nesting limits of [RecipeCodec] and [Expr]
-     * do not cover) becomes one problem for [source] instead of ending [load].
-     */
-    private fun guarded(source: String, problems: MutableList<LibraryProblem>, read: () -> RecipeEntry?): RecipeEntry? = try {
-        read()
-    } catch (e: StackOverflowError) {
-        problems += LibraryProblem(source, RecipeProblem.error("", "this file is nested too deeply to be read (the reader ran out of stack); it is skipped"))
-        null
-    }
 
     private fun fail(message: String) = LibraryResult(false, null, listOf(RecipeProblem.error("", message)))
 

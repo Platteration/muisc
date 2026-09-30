@@ -13,6 +13,7 @@ import dev.muisc.transitions.recipe.Expr
 import dev.muisc.transitions.recipe.RecipeCodec
 import dev.muisc.transitions.recipe.RecipeLibrary
 import dev.muisc.transitions.recipe.RecipeOrigin
+import dev.muisc.transitions.recipe.RecipeProblem
 import dev.muisc.transitions.recipe.RecipeStatus
 import dev.muisc.transitions.recipe.RecipeTiming
 import dev.muisc.transitions.synthetic.SyntheticTracks
@@ -135,23 +136,34 @@ class DjCustomizationTest {
         val dj = DjCustomization(dir)
         dj.reloadRecipes()
         val outcome = assertIs<RecipeImport.Unreadable>(neverThrows("import") { dj.importRecipeText(deeplyNested) })
-        assertTrue(outcome.problems.any { it.isError }, "problems: ${outcome.problems}")
+        assertTrue(outcome.problems.any { it.isError && "nested more than" in it.message && it.line != null }, "problems: ${outcome.problems}")
         assertFalse(File(dir, "recipes").exists() && File(dir, "recipes").listFiles().orEmpty().isNotEmpty())
         assertEquals(builtInStrategyCount + builtInRecipeCount, dj.registry.strategies.size)
     }
 
+    /**
+     * The JSON is fine, so this is a recipe with an error (the expression is nested past Expr.MAX_DEPTH), handled
+     * like every other recipe with errors: refused unless the user keeps it, and never used for playback.
+     */
     @Test
-    fun importOfARecipeWithADeeplyNestedExpressionIsUnreadableNotACrash() {
+    fun importOfARecipeWithADeeplyNestedExpressionIsAnErrorNotACrash() {
         val dir = tempDir()
         val dj = DjCustomization(dir)
         dj.reloadRecipes()
         val starter = RecipeCodec.encode(RecipeLibrary.starter("deep"))
         assertTrue("\"bars / 2\"" in starter, starter)
         val text = starter.replace("\"bars / 2\"", "\"" + "-".repeat(200_000) + "1\"")
-        val outcome = neverThrows("import") { dj.importRecipeText(text, allowErrors = true) }
-        assertIs<RecipeImport.Unreadable>(outcome)
+        fun tooDeep(problems: List<RecipeProblem>) =
+            assertTrue(problems.any { it.isError && "nested more than" in it.message && it.path.isNotEmpty() && it.line != null }, "problems: $problems")
+
+        val refused = assertIs<RecipeImport.HasErrors>(neverThrows("import") { dj.importRecipeText(text) })
+        tooDeep(refused.problems)
         assertFalse(File(dir, "recipes/deep.json").exists())
-        assertNull(dj.registry.strategy("recipe:deep"))
+
+        val kept = assertIs<RecipeImport.Imported>(neverThrows("import") { dj.importRecipeText(text, allowErrors = true) })
+        tooDeep(kept.problems)
+        assertEquals(RecipeStatus.INVALID, dj.recipeSet.all("deep").single().status)
+        assertNull(dj.registry.strategy("recipe:deep"), "a recipe with errors must never reach the planner")
     }
 
     @Test
@@ -163,18 +175,17 @@ class DjCustomizationTest {
         neverThrows("reload") { dj.reloadRecipes() }
         assertTrue(dj.problems().isNotEmpty(), "the unreadable file must be reported")
 
-        // Whether the library skips the file (imported) or cannot be read past it (failed), nothing throws, and a
-        // failed import writes nothing.
-        val outcome = neverThrows("import") { dj.importRecipeText(RecipeCodec.encode(RecipeLibrary.starter("mine"))) }
-        when (outcome) {
-            is RecipeImport.Imported -> assertTrue(File(dir, "recipes/mine.json").isFile)
-            is RecipeImport.Failed -> assertFalse(File(dir, "recipes/mine.json").exists(), "failed, but wrote the file")
-            else -> throw AssertionError("unexpected outcome $outcome")
-        }
+        assertTrue(dj.problems().any { "deep.json" in it && "nested more than" in it }, "problems: ${dj.problems()}")
+
+        // The library skips that one file, so everything else works as usual.
+        assertIs<RecipeImport.Imported>(neverThrows("import") { dj.importRecipeText(RecipeCodec.encode(RecipeLibrary.starter("mine"))) })
+        assertTrue(File(dir, "recipes/mine.json").isFile)
+        assertNotNull(dj.registry.strategy("recipe:mine"))
         val copied = neverThrows("duplicate") { dj.duplicateRecipe("smooth-blend") }
-        if (!copied.ok) assertTrue(copied.problems.any { it.isError }, "a failed copy must say why")
+        assertTrue(copied.ok, "copy: ${copied.problems}")
         val deleted = neverThrows("delete") { dj.deleteRecipe("mine") }
-        if (!deleted.ok) assertTrue(deleted.problems.any { it.isError }, "a failed delete must say why")
+        assertTrue(deleted.ok, "delete: ${deleted.problems}")
+        assertFalse(File(dir, "recipes/mine.json").exists())
         assertTrue(File(dir, "recipes/deep.json").isFile, "the user's file is never removed")
     }
 

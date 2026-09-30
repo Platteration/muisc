@@ -275,36 +275,16 @@ class DjCustomization(
      */
     @Synchronized
     fun importRecipeText(text: String, allowErrors: Boolean = false, replace: Boolean = false): RecipeImport {
-        // Nested deeply enough, the JSON or an expression in it overflows the parser's recursion. A
-        // StackOverflowError is an Error, which nothing up to the ViewModel catches: it would end the process.
-        val parsed = try {
-            RecipeCodec.parse(text)
-        } catch (e: StackOverflowError) {
-            return RecipeImport.Unreadable(listOf(RecipeProblem.error("", TOO_DEEP)))
-        }
+        val parsed = RecipeCodec.parse(text)
         val recipe = parsed.recipe ?: return RecipeImport.Unreadable(parsed.problems)
-        val problems = try {
-            parsed.locate(library.validator.validate(recipe).problems)
-        } catch (e: StackOverflowError) {
-            return RecipeImport.Unreadable(listOf(RecipeProblem.error("", TOO_DEEP)))
-        }
+        val problems = parsed.locate(library.validator.validate(recipe).problems)
         if (!RecipeValidator.ID_PATTERN.matches(recipe.id)) {
             return RecipeImport.Failed("the recipe id '${recipe.id}' may only use lowercase letters, digits and dashes", problems)
         }
         if (problems.any { it.isError } && !allowErrors) return RecipeImport.HasErrors(recipe.id, recipe.name, problems)
-        // Loading and saving read the files already in the recipes folder, and one of those can be the deep one.
-        // Both overflow before anything is written (the library writes last), so the import is refused.
-        val existing = try {
-            library.load().all(recipe.id).firstOrNull { it.origin == RecipeOrigin.USER }
-        } catch (e: StackOverflowError) {
-            return RecipeImport.Failed(FOLDER_TOO_DEEP, problems)
-        }
+        val existing = library.load().all(recipe.id).firstOrNull { it.origin == RecipeOrigin.USER }
         if (existing != null && !replace) return RecipeImport.Conflict(recipe.id, existing.recipe.name, problems)
-        val result = try {
-            library.save(recipe, allowErrors = allowErrors)
-        } catch (e: StackOverflowError) {
-            return RecipeImport.Failed(FOLDER_TOO_DEEP, problems)
-        }
+        val result = library.save(recipe, allowErrors = allowErrors)
         reloadRecipes()
         return if (result.ok) RecipeImport.Imported(recipe.id, recipe.name, problems)
         else RecipeImport.Failed(result.problems.firstOrNull { it.isError }?.message ?: "the recipe was not saved", result.problems)
@@ -320,13 +300,9 @@ class DjCustomization(
     /** Saves a copy of recipe [id] under the first free id `<id>-copy`, `<id>-copy-2`, ... */
     @Synchronized
     fun duplicateRecipe(id: String): LibraryResult {
-        val result = try {
-            val taken = library.load().entries.map { it.id }.toSet()
-            val newId = freeId("$id-copy", taken)
-            library.duplicate(id, newId)
-        } catch (e: StackOverflowError) {
-            LibraryResult(false, null, listOf(RecipeProblem.error("", FOLDER_TOO_DEEP)))
-        }
+        val taken = library.load().entries.map { it.id }.toSet()
+        val newId = freeId("$id-copy", taken)
+        val result = library.duplicate(id, newId)
         reloadRecipes()
         return result
     }
@@ -334,11 +310,7 @@ class DjCustomization(
     /** Deletes the user recipe [id]; built-ins cannot be deleted. */
     @Synchronized
     fun deleteRecipe(id: String): LibraryResult {
-        val result = try {
-            library.delete(id)
-        } catch (e: StackOverflowError) {
-            LibraryResult(false, null, listOf(RecipeProblem.error("", FOLDER_TOO_DEEP)))
-        }
+        val result = library.delete(id)
         reloadRecipes()
         return result
     }
@@ -503,12 +475,6 @@ class DjCustomization(
         const val RECIPES_DIR = "recipes"
         const val STYLE_FILE = "style"
         const val FEEDBACK_FILE = "feedback.json"
-
-        /** Why a file whose JSON or expressions are nested too deeply to parse is [RecipeImport.Unreadable]. */
-        const val TOO_DEEP = "the file is nested too deeply to read as a recipe"
-
-        /** Why a recipe was not saved, copied or deleted: a file already in the recipes folder is nested too deeply. */
-        const val FOLDER_TOO_DEEP = "a file in the recipes folder is nested too deeply to read; move it out of the folder and try again"
 
         /** `"Tight 8-bar swap!"` → `"tight-8-bar-swap"`; never empty, at most 48 characters. */
         fun slug(text: String): String {

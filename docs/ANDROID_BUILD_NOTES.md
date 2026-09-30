@@ -61,9 +61,9 @@ Both modes are **clean — zero errors** over all 90 Kotlin files in `app/src/ma
   `planExplained`).
 * Every `R.string` / `R.drawable` / `R.plurals` / `R.color` / `R.style` reference resolves against a
   name that really exists in `app/src/main/res` (the harness generates `R` from the resource files).
-* The app's own unit tests compile **and pass** (`app/typecheck.sh test`): 39 tests — `FolderTreeTest`,
-  `GaplessTagParserTest`, and for the DJ customization `DjCustomizationTest` (17), `QueueReplanIdsTest` (3)
-  and `ReplanNextEdgeTest` (1, the real `TransitionCoordinator`) — run on the JUnit 5 platform against the
+* The app's own unit tests compile **and pass** (`app/typecheck.sh test`): 48 tests — `FolderTreeTest`,
+  `GaplessTagParserTest`, and for the DJ customization `DjCustomizationTest` (21), `QueueReplanIdsTest` (3),
+  `ReplanNextEdgeTest` (1, the real `TransitionCoordinator`) and `AbVoteTest` (5) — run on the JUnit 5 platform against the
   same classes and the engine's real resources.
 * Kotlin opt-in propagation is real for the Compose markers, which is how §2's biggest batch of
   errors was found.
