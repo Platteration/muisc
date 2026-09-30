@@ -55,8 +55,8 @@ import kotlin.math.pow
  * master grid, so a bar is a bar at whatever tempo; `none`: A's bar length), converted to their working domain
  * (linear gain for level and dB lanes, ln Hz for cutoffs), smoothed by a [SMOOTH_TAPS]-block moving average over
  * the ~30 ms that FOLLOW each block, and interpolated linearly per sample. So every change is at least a ~30 ms
- * ramp (a `step` included), and the ramp ENDS on the point's bar: a lane reaches each point's value exactly where
- * the recipe puts it. Both halves matter on beat-aligned moves. A gain that falls to silence within a few
+ * ramp (a `step` included), and the ramp ENDS on the point's bar (up to one block, 1.5 ms, early): a lane has
+ * reached each point's value when the timeline reaches the point. Both halves matter on beat-aligned moves. A gain that falls to silence within a few
  * milliseconds *after* a transient cuts the transient short, which is audible (and measurable) as a tick although
  * the waveform has no discontinuity; a cut that is complete when the downbeat's transient arrives removes it
  * cleanly, and a deck that jumps up on a downbeat is at full level when its transient starts.
@@ -341,7 +341,9 @@ internal object RecipeRenderer {
         val n = x[0].size
         val cut = BlockLane.sample(lane, n, barAt, Domain.LOG_HZ)
         val neutralLn = ln(lane.kind.neutral)
-        val engage = cut.map { v -> (abs(v - neutralLn) / LN2).coerceIn(0.0, 1.0) }
+        // Exactly 0 at the neutral cutoff (the mean of identical block values can be an ulp off), so a parked filter
+        // is bypassed sample-exactly.
+        val engage = cut.map { v -> (abs(v - neutralLn) / LN2).let { if (it < 1e-9) 0.0 else it.coerceAtMost(1.0) } }
         val q = resonance.coerceIn(MIN_Q, MAX_Q)
         val svf = StateVariableFilter(sr, ch, exp(cut.valueAtBlock(0)), q)
         svf.mode = mode
@@ -608,15 +610,16 @@ internal class BlockLane(private val v: DoubleArray) {
     companion object {
         /**
          * Samples [lane] at the block boundaries of `[0, frames]` ([barAt] maps a local frame to a timeline bar),
-         * transforms into [domain] and smooths each block with the mean of itself and the
-         * [RecipeRenderer.SMOOTH_TAPS]` - 1` blocks after it (a look-ahead average: a step ends on its own block).
+         * transforms into [domain] and smooths: the value at boundary `k` is the mean of the lane at the
+         * [RecipeRenderer.SMOOTH_TAPS] boundaries AFTER it (`k + 1 .. k + SMOOTH_TAPS`), a look-ahead average, so a
+         * step is complete at the last boundary before its bar and the sample-rate interpolation never leaks past it.
          */
         fun sample(lane: ResolvedLane, frames: Int, barAt: (Long) -> Double, domain: Domain): BlockLane {
             val b = RecipeRenderer.BLOCK
             val nb = frames / b + 2
             val taps = RecipeRenderer.SMOOTH_TAPS
-            val raw = DoubleArray(nb + taps - 1) { j -> domain.transform(lane.valueAt(barAt(j.toLong() * b))) }
-            return BlockLane(DoubleArray(nb) { k -> var s = 0.0; for (j in k until k + taps) s += raw[j]; s / taps })
+            val raw = DoubleArray(nb + taps) { j -> domain.transform(lane.valueAt(barAt(j.toLong() * b))) }
+            return BlockLane(DoubleArray(nb) { k -> var s = 0.0; for (j in k + 1..k + taps) s += raw[j]; s / taps })
         }
     }
 }
