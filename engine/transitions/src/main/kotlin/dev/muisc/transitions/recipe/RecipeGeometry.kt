@@ -451,10 +451,13 @@ internal object RecipeGeometry {
         val out = ArrayList<String>()
         for ((id, lane) in deckLanes(r.a, DECK_A)) {
             val v = lane.valueAt(0.0)
-            if (!near(v, lane.kind.neutral, lane.kind)) out += "boundary rule: $id is ${formatValue(lane.kind, v)} at bar 0 (neutral is ${formatValue(lane.kind, lane.kind.neutral)}); A is blended into the processed signal over ${BeatDomain.SEAM_BLEND_FRAMES} frames"
+            if (near(v, lane.kind.neutral, lane.kind)) continue
+            out += "boundary rule: $id is ${formatValue(lane.kind, v)} at bar 0 (neutral is ${formatValue(lane.kind, lane.kind.neutral)}); " +
+                if (lane.kind.isEffect) "the send feed fades in over ${RecipeRenderer.FADE_IN_FRAMES} frames" else "A is blended into the processed signal over ${BeatDomain.SEAM_BLEND_FRAMES} frames"
         }
         val endBar = t.timelineBars
-        for ((id, lane) in deckLanes(r.b, DECK_B)) {
+        // B's sends and freezes are covered by the last-bar check below (effect tails are released, not blended).
+        for ((id, lane) in deckLanes(r.b, DECK_B).filter { !it.second.kind.isEffect }) {
             val v = lane.valueAt(endBar)
             if (!near(v, lane.kind.neutral, lane.kind)) out += "boundary rule: $id is ${formatValue(lane.kind, v)} at the end of the timeline (bar ${fmt(endBar)}); B is blended back to its dry signal over the last ${BeatDomain.SEAM_BLEND_FRAMES} frames"
         }
@@ -462,12 +465,14 @@ internal object RecipeGeometry {
         val levelAtEnd = r.a.level.valueAt(aEnd)
         if (levelAtEnd > LEVEL_SILENT) out += "boundary rule: A's level is ${fmt(levelAtEnd)} at the end of the overlap (bar ${fmt(aEnd)}); A is declicked with a ${DECLICK_MS.toInt()} ms fade"
         val lastBar = max(0.0, endBar - 1.0)
-        for ((id, lane) in (deckLanes(r.a, DECK_A) + deckLanes(r.b, DECK_B)).filter { it.second.kind == LaneKind.SEND || it.second.kind == LaneKind.FREEZE }) {
+        for ((id, lane) in (deckLanes(r.a, DECK_A) + deckLanes(r.b, DECK_B)).filter { it.second.kind.isEffect }) {
             val threshold = if (lane.kind == LaneKind.FREEZE) 0.5 else 1e-6
             if (maxOver(lane, lastBar, endBar) >= threshold) out += "boundary rule: $id is still ${if (lane.kind == LaneKind.FREEZE) "on" else "open"} in the last bar before the post-roll; effect tails are released over that bar"
         }
         return out
     }
+
+    private val LaneKind.isEffect: Boolean get() = this == LaneKind.SEND || this == LaneKind.FREEZE
 
     /** Largest value of [lane] over `[from, to]` (its points inside plus both ends). */
     fun maxOver(lane: ResolvedLane, from: Double, to: Double): Double {
