@@ -25,6 +25,12 @@ import dev.muisc.transitions.DefaultTransitionRenderer
 import dev.muisc.transitions.PairFeatures
 import dev.muisc.transitions.TrackRef
 import dev.muisc.transitions.TransitionPrefs
+import dev.muisc.transitions.custom.PairPin
+import dev.muisc.transitions.custom.PlannerCustomization
+import dev.muisc.transitions.custom.PresetResolution
+import dev.muisc.transitions.custom.StrategyPreset
+import dev.muisc.transitions.custom.StyleProfile
+import dev.muisc.transitions.custom.UserProfile
 import dev.muisc.transitions.planner.DefaultTransitionPlanner
 import dev.muisc.transitions.synthetic.JvmTrackAudioLoader
 import kotlinx.serialization.json.Json
@@ -35,10 +41,21 @@ import java.io.File
  * [AnalysisService] in front of it, the shipped strategy registry, the planner, the audio loader and the renderer.
  *
  * Built by [MuiscCommand] from the options every command shares (`--cache-dir`, `--prefs`, `--set-pref`,
- * `--rate`, `--channels`), so `muisc render --set-pref energy=0.9` and `muisc ab --set-pref energy=0.9` mean
- * exactly the same thing.
+ * `--rate`, `--channels`, `--profile-dir`, `--style`, `--preset`), so `muisc render --set-pref energy=0.9` and
+ * `muisc ab --set-pref energy=0.9` mean exactly the same thing.
+ *
+ * @param profile the user's customization directory; its pins, learned weights and presets feed the [planner].
+ *   Null (the default) plans without customization.
+ * @param preset the `--preset` in force: the planner treats every pair as pinned to that preset's strategy (it
+ *   still falls back when the strategy is blocked for the pair) and the preset's values are folded into
+ *   [prefs]`.paramOverrides` by [MuiscCommand].
  */
-class CliContext(val prefs: TransitionPrefs, val cacheDir: File) : AutoCloseable {
+class CliContext(
+    val prefs: TransitionPrefs,
+    val cacheDir: File,
+    val profile: UserProfile? = null,
+    val preset: StrategyPreset? = null,
+) : AutoCloseable {
 
     val decoder: AudioDecoder = JavaSoundDecoder()
     val cache: FileAnalysisCache = FileAnalysisCache(cacheDir)
@@ -51,7 +68,8 @@ class CliContext(val prefs: TransitionPrefs, val cacheDir: File) : AutoCloseable
     )
     val registry: DefaultStrategyRegistry = DefaultStrategyRegistry.default()
     val pairAnalyzer: DefaultPairAnalyzer = DefaultPairAnalyzer()
-    val planner: DefaultTransitionPlanner = DefaultTransitionPlanner(registry, pairAnalyzer)
+    val customization: PlannerCustomization = profile?.customization(sessionPin(preset)) ?: PlannerCustomization.NONE
+    val planner: DefaultTransitionPlanner = DefaultTransitionPlanner(registry, pairAnalyzer, customization = customization)
     val loader: JvmTrackAudioLoader = JvmTrackAudioLoader(decoder)
     val separator: PseudoStemSeparator = PseudoStemSeparator()
     val renderer: DefaultTransitionRenderer = DefaultTransitionRenderer(loader, registry, separator)
@@ -59,6 +77,9 @@ class CliContext(val prefs: TransitionPrefs, val cacheDir: File) : AutoCloseable
 
     val sampleRate: Int get() = prefs.sampleRate
     val channels: Int get() = prefs.channels
+
+    /** The profile, or a readable error for commands that need one. */
+    fun requireProfile(): UserProfile = profile ?: throw CliktError("this command needs a profile directory (--profile-dir)")
 
     /** Analyses [file] (cache-fronted) and wraps it in a [TrackRef]; every decoding failure becomes a readable error. */
     fun trackRef(file: File, force: Boolean = false, progress: AnalysisProgress = AnalysisProgress.NONE): TrackRef {
@@ -99,6 +120,17 @@ class CliContext(val prefs: TransitionPrefs, val cacheDir: File) : AutoCloseable
             System.getenv("MUISC_CACHE")?.takeIf { it.isNotBlank() }?.let { return File(it) }
             return File(System.getProperty("user.home") ?: ".", ".muisc/analysis")
         }
+
+        /** `--profile-dir` ← `MUISC_HOME` ← `~/.muisc` (holds `presets/`, `styles/`, `pins.json`, `feedback.json`). */
+        fun defaultProfileDir(explicit: File?, env: (String) -> String? = System::getenv): File {
+            explicit?.let { return it }
+            env("MUISC_HOME")?.takeIf { it.isNotBlank() }?.let { return File(it) }
+            return File(System.getProperty("user.home") ?: ".", ".muisc")
+        }
+
+        /** The session-wide pin `--preset` stands for: that preset's strategy for every pair. */
+        fun sessionPin(preset: StrategyPreset?): PairPin? =
+            preset?.let { PairPin(PairPin.ANY, PairPin.ANY, it.strategyId, presetId = it.id, note = "--preset ${it.id}") }
     }
 }
 
@@ -117,6 +149,9 @@ abstract class MuiscCommand(name: String) : CliktCommand(name = name) {
     private val rateOpt by option("--rate", metavar = "HZ", help = "Engine sample rate (default 44100).").int()
     private val channelsOpt by option("--channels", metavar = "N", help = "Engine channel count (default 2).").int()
     private val debug by option("--debug", help = "Print a stack trace when a command fails.").flag()
+    private val profileDirOpt by option("--profile-dir", metavar = "DIR", help = "Presets, styles, pins and ratings (default \$MUISC_HOME or ~/.muisc).").file(canBeFile = false)
+    private val styleOpt by option("--style", metavar = "ID", help = "Apply a listening style to the prefs (see `muisc style list`); --set-pref still wins.")
+    private val presetOpt by option("--preset", metavar = "ID", help = "Plan every pair with this preset's strategy and values when it applies (see `muisc preset list`).")
 
     /** Seed for the deterministic jitter in the planner and for every render. */
     val seed by option("--seed", metavar = "N", help = "Deterministic seed (default 0).").long().default(0L)
@@ -125,8 +160,22 @@ abstract class MuiscCommand(name: String) : CliktCommand(name = name) {
 
     final override fun run() {
         started = System.nanoTime()
-        val prefs = PrefsIo.resolve(prefsFile, prefAssignments, rateOpt, channelsOpt)
-        CliContext(prefs, CliContext.defaultCacheDir(cacheDirOpt)).use { ctx ->
+        val profile = UserProfile(CliContext.defaultProfileDir(profileDirOpt))
+        for (w in profile.warnings()) echo("warning: $w", err = true)
+        val style: StyleProfile? = styleOpt?.let { id ->
+            profile.style(id) ?: throw CliktError("unknown style '$id'. Known: ${profile.styles.all().joinToString(", ") { it.id }}")
+        }
+        val preset: StrategyPreset? = presetOpt?.let { id ->
+            profile.presetLookup.preset(id) ?: throw CliktError("unknown preset '$id'. Known: ${profile.presets.all().joinToString(", ") { it.id }}")
+        }
+        val resolved = PrefsIo.resolve(prefsFile, prefAssignments, rateOpt, channelsOpt, style)
+        // Fold active presets (and --preset) into paramOverrides so every code path that re-plans from the overrides
+        // (render --set, forced strategies) sees the same values as the planner.
+        val prefs = PresetResolution.fold(resolved, profile.presetLookup, preset)
+        CliContext(prefs, CliContext.defaultCacheDir(cacheDirOpt), profile, preset).use { ctx ->
+            if (preset != null && ctx.registry.strategy(preset.strategyId) == null) {
+                throw CliktError("preset '${preset.id}' is for strategy '${preset.strategyId}', which is not registered. Known: ${ctx.registry.strategyIds.joinToString(", ")}")
+            }
             try {
                 execute(ctx)
             } catch (e: CliktError) {
@@ -162,7 +211,7 @@ object PrefsIo {
     val KEYS = listOf(
         "enabled", "allowInAlbums", "keepAlbumFlowInShuffle", "maxStretchPercent", "maxPitchShiftSemitones",
         "keyLock", "targetLufs", "preferredOverlapBars", "energy", "varietyPenalty", "sampleRate", "channels",
-        "disabledStrategies", "strategyWeights.<id>", "paramOverrides.<strategyId>.<paramId>",
+        "disabledStrategies", "strategyWeights.<id>", "paramOverrides.<strategyId>.<paramId>", "activePresets.<strategyId>",
     )
 
     fun load(file: File?): TransitionPrefs {
@@ -179,8 +228,10 @@ object PrefsIo {
         }
     }
 
-    fun resolve(file: File?, assignments: List<String>, rate: Int?, channels: Int?): TransitionPrefs {
-        var prefs = apply(load(file), assignments)
+    /** Prefs file ← [style] ← `--set-pref` [assignments] ← `--rate` / `--channels`. */
+    fun resolve(file: File?, assignments: List<String>, rate: Int?, channels: Int?, style: StyleProfile? = null): TransitionPrefs {
+        val loaded = load(file)
+        var prefs = apply(style?.apply(loaded) ?: loaded, assignments)
         if (rate != null) {
             if (rate < 8000 || rate > 192_000) throw CliktError("--rate $rate is out of range (8000..192000)")
             prefs = prefs.copy(sampleRate = rate)
@@ -227,6 +278,11 @@ object PrefsIo {
             if (rest.size != 2) throw CliktError("paramOverrides key must be paramOverrides.<strategyId>.<paramId>, got '$key'")
             val (sid, pid) = rest
             p.copy(paramOverrides = p.paramOverrides + (sid to (p.paramOverrides[sid].orEmpty() + (pid to v))))
+        }
+        key.startsWith("activePresets.") -> {
+            val sid = key.removePrefix("activePresets.")
+            if (sid.isEmpty()) throw CliktError("activePresets key must be activePresets.<strategyId>, got '$key'")
+            p.copy(activePresets = if (v.isEmpty() || v == "none") p.activePresets - sid else p.activePresets + (sid to v))
         }
         else -> throw CliktError("unknown preference '$key'. Known keys: ${KEYS.joinToString(", ")}")
     }
