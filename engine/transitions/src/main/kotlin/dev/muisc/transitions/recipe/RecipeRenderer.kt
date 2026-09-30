@@ -1,7 +1,7 @@
 package dev.muisc.transitions.recipe
 
 import dev.muisc.audio.AudioBuffer
-import dev.muisc.dsp.filter.MultibandCrossover
+import dev.muisc.dsp.filter.ZeroPhaseCrossover
 import dev.muisc.dsp.filter.StateVariableFilter
 import dev.muisc.dsp.filter.SvfMode
 import dev.muisc.dsp.fx.Delay
@@ -34,9 +34,10 @@ import kotlin.math.pow
  *    `glide`) or from A's bar length (`none`) — so every deck is stretched once, after its stems are mixed.
  * 2. **Alignment**: `match` / `glide` render the deck with a [PhaseLockedDeck] on the plan's master grid (as
  *    `bassSwap` does); `none` copies the window unstretched.
- * 3. **3-band EQ**: a Linkwitz-Riley [MultibandCrossover] at `lowHz` / `highHz`, one gain lane per band. Skipped
- *    for a deck whose three bands are neutral for the whole recipe. When it runs it runs for the whole deck (the
- *    all-pass-compensated sum is flat but not sample-identical, which the guard blends below absorb).
+ * 3. **3-band EQ**: a zero-phase Linkwitz-Riley split ([ZeroPhaseCrossover]) at `lowHz` / `highHz`, one gain lane
+ *    per band. Skipped for a deck whose three bands are neutral for the whole recipe. The bands sum to the deck, so
+ *    wherever all three lanes are at 0 dB the deck passes unchanged and no band is delayed against the others or
+ *    against the dry guard regions.
  * 4. **Filters**: a high-pass and a low-pass [StateVariableFilter] (resonance = the deck's `resonance`, clamped to
  *    0.5..6), each skipped when its lane is neutral for the whole recipe. The cutoff follows its lane on a log scale.
  *    The filtered signal is cross-faded with the unfiltered one by an "engage" amount that is 0 at the neutral
@@ -305,30 +306,27 @@ internal object RecipeRenderer {
         return DeckOut(post, echoFeed, reverbFeed)
     }
 
-    /** 3-band LR4 EQ, one gain lane per band, bands summed back (in place). */
+    /** Zero-phase 3-band LR4 EQ ([ZeroPhaseCrossover]: the bands sum to the deck), one gain lane per band, bands summed back (in place). */
     private fun equalise(x: Array<FloatArray>, deck: ResolvedDeck, lowHz: Double, highHz: Double, barAt: (Long) -> Double, sr: Int) {
-        val ch = x.size
         val n = x[0].size
         val nyq = sr * 0.45
         val lo = lowHz.coerceIn(20.0, nyq * 0.5)
         val hi = highHz.coerceIn(lo * 1.01, nyq)
-        val xo = MultibandCrossover(sr, ch, doubleArrayOf(lo, hi), CHUNK)
+        val edges = doubleArrayOf(lo, hi)
         val lanes = listOf(deck.low, deck.mid, deck.high).map { BlockLane.sample(it, n, barAt, Domain.GAIN_DB) }
-        val inC = Array(ch) { FloatArray(CHUNK) }
-        val bands = Array(3) { Array(ch) { FloatArray(CHUNK) } }
+        val bands = Array(3) { FloatArray(n) }
         val gains = Array(3) { FloatArray(CHUNK) }
-        var pos = 0
-        while (pos < n) {
-            val m = min(CHUNK, n - pos)
-            for (c in 0 until ch) System.arraycopy(x[c], pos, inC[c], 0, m)
-            xo.process(inC, bands, m)
-            for (k in 0 until 3) lanes[k].fill(gains[k], pos, m)
-            val g0 = gains[0]; val g1 = gains[1]; val g2 = gains[2]
-            for (c in 0 until ch) {
-                val y = x[c]; val b0 = bands[0][c]; val b1 = bands[1][c]; val b2 = bands[2][c]
-                for (i in 0 until m) y[pos + i] = b0[i] * g0[i] + b1[i] * g1[i] + b2[i] * g2[i]
+        for (y in x) {
+            ZeroPhaseCrossover.split(y, n, sr, edges, bands)
+            val b0 = bands[0]; val b1 = bands[1]; val b2 = bands[2]
+            var pos = 0
+            while (pos < n) {
+                val m = min(CHUNK, n - pos)
+                for (k in 0 until 3) lanes[k].fill(gains[k], pos, m)
+                val g0 = gains[0]; val g1 = gains[1]; val g2 = gains[2]
+                for (i in 0 until m) y[pos + i] = b0[pos + i] * g0[i] + b1[pos + i] * g1[i] + b2[pos + i] * g2[i]
+                pos += m
             }
-            pos += m
         }
     }
 

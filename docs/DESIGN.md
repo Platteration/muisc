@@ -467,7 +467,8 @@ Analysis features needed are listed per strategy as **Needs**. Failure modes are
 
 #### 5. `bassSwap` — EQ mix with low-band handover
 - **When**: as 4; also live-capable when `|tempoRatio−1| ≤ 0.02` (rate node, no WSOLA).
-- **DSP**: LR4 3-band split (200 Hz / 4 kHz, all-pass-compensated); B enters with lows cut; at `swapBar` downbeat
+- **DSP**: zero-phase 3-band split with LR4 magnitudes (200 Hz / 4 kHz, `ZeroPhaseCrossover`: the bands sum back to
+  the deck, so the EQ delays nothing); B enters with lows cut; at `swapBar` downbeat
   A's low band fades out and B's fades in over `swapBeats`; mids/highs equal-power over the remaining bars.
 - **Params**: `overlapBars` 16, `swapBar` 8, `swapBeats` 1 (1–4), `lowHz` 200, `highHz` 4000.
 - **Needs**: grid, cues, low-end share, loudness.
@@ -678,7 +679,7 @@ All primitives are stateful objects with `reset()` and `process(in, out, n)` (or
 | `fft` (in flight) | `Fft`, `RealFft`, `Stft`, `Istft`, `Spectrogram`, `StftFrameSink` | Iterative radix-2 with precomputed twiddles/bit-reversal, real FFT via N/2 packing, sizes 256–65 536; streaming STFT with sink callback; ISTFT with √Hann at 75 % overlap, COLA-normalised |
 | `window` (in flight) | `Window` | Hann, √Hann, Hamming, Blackman–Harris 4-term, Kaiser(β), Tukey(α) |
 | `mel` (in flight) | `MelFilterbank` | Triangular bands, log compression |
-| `filter` (in flight) | `Biquad`/`BiquadFilter`/`BiquadCascade`, `LinkwitzRileyCrossover`, `MultibandCrossover`, `OnePole`, `StateVariableFilter` | RBJ cookbook, TDF-II, coefficient interpolation per 64-sample block; LR4 = 2 × Butterworth-2 (Q = 1/√2) per band, 3-way with all-pass-compensated low band so the sum is magnitude-flat (tested to −80 dB); SVF = Zavalishin TPT with exponential cutoff ramps, Q ≤ 6 |
+| `filter` (in flight) | `Biquad`/`BiquadFilter`/`BiquadCascade`, `LinkwitzRileyCrossover`, `MultibandCrossover`, `ZeroPhaseCrossover`, `OnePole`, `StateVariableFilter` | RBJ cookbook, TDF-II, coefficient interpolation per 64-sample block; LR4 = 2 × Butterworth-2 (Q = 1/√2) per band, 3-way with all-pass-compensated low band so the sum is magnitude-flat (tested to −80 dB); `ZeroPhaseCrossover` = offline forward-backward Butterworth-2 per split with the remainder by subtraction (LR4 magnitudes, zero phase, bands sum to the input), used by `bassSwap` and the recipes' EQ; SVF = Zavalishin TPT with exponential cutoff ramps, Q ≤ 6 |
 | `resample` (in flight) | `SincKernel(taps=32, phases=512, β=9)`, `Resampler`, `StreamingResampler`, `VariableRateResampler` | Polyphase windowed sinc; **512 phases with linear inter-phase interpolation** (the 64/128-phase default must be raised: interpolation error ≈ −90 dB needs ≥ 512 phases at 32 taps); `StreamingResampler.alignTo(outputFrame)` primes history deterministically; variable-rate version takes a per-block ratio ramp (vinyl stretch, brake, pitch shift) |
 | `gain` (in flight) | `Curves` (LINEAR, EQUAL_POWER, S_CURVE, EXP), `GainRamp` | Per-sample linear ramps between block-evaluated points; no transcendental calls per sample |
 | `stretch` | `TimeStretcher` interface, `WsolaStretcher`, `PhaseVocoderStretcher`, `PitchShifter` | WSOLA: frame 30 ms, synthesis hop 15 ms, ±10 ms search by normalised cross-correlation on a 4:1 decimated envelope refined at full rate; **transient pinning**: when an `onsetFrames` entry falls inside the next frame, search radius → 0 and the frame boundary snaps so the onset is copied once; stereo uses one lag from the mid signal; ratio 0.75–1.33 (planner refuses beyond). Phase vocoder (identity phase locking, Laroche & Dolson 1999) behind `PHASE_VOCODER` for sustained pads (AmbientBridge). PitchShifter = resample 2^(−s/12) ∘ WSOLA 2^(s/12), ±3 semitones |
@@ -843,8 +844,11 @@ the real analyser lands.
   (> 50 ms below −70 dBFS where none is planned).
 - `seamIdentity`: first/last 2048 frames of the render vs deck-gained source samples: max abs diff ≤ 1e−6 (FAIL) and
   cross-correlation ≥ 0.999.
-- `beatAlignmentMs`: ODF of the render (parabolic sub-frame peaks) vs `MasterGrid` beats over the overlap: median
-  ≤ 5 ms, max ≤ 12 ms for WSOLA plans; max ≤ 3 ms for RESAMPLE plans and at pinned onsets.
+- `beatAlignmentMs` / `beatAlignmentP90Ms`: per master beat, the render's strongest attack within ±50 ms (rise of
+  the analytic envelope above its previous 20 ms, 1 ms blocks, parabolic sub-block peak) against the nearest attack
+  the sources have there, mapped through their beat grids; beats where the render or neither source has an attack
+  are not counted. Median WARN > 5 ms; 90th percentile WARN > 5 ms, FAIL > 12 ms (see `ArtifactMetrics.beatAlignment`
+  and docs/QUALITY.md). The 3 ms budget for RESAMPLE plans and pinned onsets is not implemented.
 - `rateTrackingErr`: `ratioTrace` vs planned ratio curve, max |Δ| ≤ 0.5 % (glides).
 - `bassCancellation`: low-band (< 150 Hz) energy of the mix vs sum of the deck low bands over the overlap: FAIL if
   < −6 dB (out-of-phase kicks).

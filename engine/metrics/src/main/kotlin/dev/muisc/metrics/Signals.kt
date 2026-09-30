@@ -1,6 +1,7 @@
 package dev.muisc.metrics
 
 import dev.muisc.audio.AudioBuffer
+import dev.muisc.dsp.fft.Fft
 import dev.muisc.dsp.filter.BiquadCascade
 import dev.muisc.dsp.filter.LinkwitzRiley
 import kotlin.math.abs
@@ -159,59 +160,121 @@ internal object Signals {
     }
 
     /**
-     * Onset times in seconds of a rendered segment, with parabolic sub-block interpolation (DESIGN.md §9:
-     * "ODF of the render (parabolic sub-frame peaks)").
+     * Attack function of a buffer for beat alignment (DESIGN.md §9, "ODF of the render (parabolic sub-frame
+     * peaks)"): `odf[k]` is how far the mono mix's **analytic envelope** ([analyticEnvelope], averaged over 1 ms
+     * blocks) rises in block k above its maximum over the [RISE_LOOKBACK_MS] before it. Create with [attacks].
      *
-     * The detection function is the half-wave-rectified difference of a short RMS envelope (1 ms blocks by
-     * default, i.e. 1 ms resolution before interpolation); peaks are local maxima of that function above
-     * `peakFraction * max(odf)` and at least [minSpacingMs] apart. The time of a peak at block k is
-     * `(k + 0.5 + delta) * blockMs`: the rise from block k-1 to block k means the attack lies inside block k,
-     * whose centre is half a block after its start, and `delta in [-0.5, 0.5]` is the vertex of the parabola
-     * through `(odf[k-1], odf[k], odf[k+1])`.
+     * Both halves of that definition replace what the metric used before, a half-wave-rectified difference of a
+     * 1 ms block RMS, which measured the waveform rather than its attacks on bass-heavy material:
+     *  - a 1 ms RMS of a 45-155 Hz kick or bass note rises and falls with every half-cycle, and the analytic
+     *    envelope of a sinusoid does not;
+     *  - kick, bass and pads beat against each other (within one deck as well as across two), so even the analytic
+     *    envelope dips and recovers within a beat - by 6 dB and more in the fixtures' own sources - and a recovery
+     *    is a rise. A recovery only regains a level the envelope already had; an attack exceeds it.
      */
-    fun onsetTimesSec(
-        buffer: AudioBuffer,
-        blockMs: Double = 1.0,
-        peakFraction: Double = 0.1,
-        minSpacingMs: Double = 50.0,
-        floorDb: Double = -70.0,
-    ): DoubleArray {
-        val sr = buffer.sampleRate
-        val x = mono(buffer)
-        val block = msFrames(blockMs, sr)
-        val rms = blockRms(x, block)
-        if (rms.size < 3) return DoubleArray(0)
-        val odf = DoubleArray(rms.size)
-        for (k in 1 until rms.size) odf[k] = max(0.0, rms[k] - rms[k - 1])
-        var peak = 0.0
-        for (v in odf) if (v > peak) peak = v
-        if (peak <= 0.0) return DoubleArray(0)
-        val threshold = peak * peakFraction
-        val floorRms = Math.pow(10.0, floorDb / 20.0)
-        val spacing = max(1, Math.round(minSpacingMs / blockMs).toInt())
-        val times = ArrayList<Double>()
-        var lastK = -spacing - 1
-        var k = 1
-        while (k < odf.size - 1) {
-            val v = odf[k]
-            if (v >= threshold && v >= odf[k - 1] && v > odf[k + 1] && rms[k] > floorRms) {
-                if (k - lastK >= spacing) {
-                    val d = parabolicOffset(odf[k - 1], v, odf[k + 1])
-                    times += (k + 0.5 + d) * block / sr.toDouble()
-                    lastK = k
-                } else if (lastK >= 0 && times.isNotEmpty() && v > odf[lastK]) {
-                    // A stronger peak inside the guard window replaces the previous one.
-                    val d = parabolicOffset(odf[k - 1], v, odf[k + 1])
-                    times[times.size - 1] = (k + 0.5 + d) * block / sr.toDouble()
-                    lastK = k
-                }
+    class Attacks(val odf: DoubleArray, val blockFrames: Int, val sampleRate: Int) {
+        /** The strongest attack of the whole buffer; [strongestNear] reports only attacks above a fraction of it. */
+        val peak: Double = odf.maxOrNull() ?: 0.0
+
+        /** Times in seconds of every local maximum of [odf] within `t ± windowSec` that reaches `peakFraction * peak`. */
+        fun allNear(t: Double, windowSec: Double, peakFraction: Double = ATTACK_PEAK_FRACTION): DoubleArray {
+            if (peak <= 0.0) return DoubleArray(0)
+            val blockSec = blockFrames / sampleRate.toDouble()
+            val lo = max(1, Math.floor((t - windowSec) / blockSec).toInt() - 1)
+            val hi = min(odf.size - 2, Math.ceil((t + windowSec) / blockSec).toInt() + 1)
+            val out = ArrayList<Double>()
+            for (k in lo..hi) {
+                val v = odf[k]
+                if (v < peakFraction * peak || v < odf[k - 1] || v <= odf[k + 1]) continue
+                val time = (k + 0.5 + parabolicOffset(odf[k - 1], v, odf[k + 1])) * blockSec
+                if (abs(time - t) <= windowSec) out += time
             }
-            k++
+            return out.toDoubleArray()
         }
-        val out = DoubleArray(times.size)
-        for (i in times.indices) out[i] = times[i]
+
+        /**
+         * Time in seconds of the strongest local maximum of [odf] whose time lies within `t ± windowSec`, with
+         * parabolic sub-block interpolation (a peak at block k is at `(k + 0.5 + delta)` blocks: the rise into
+         * block k puts the attack inside it). NaN when there is none, or when it is weaker than
+         * `peakFraction * peak`: a stretch without a real attack has no time to report.
+         */
+        fun strongestNear(t: Double, windowSec: Double, peakFraction: Double = ATTACK_PEAK_FRACTION): Double {
+            if (peak <= 0.0) return Double.NaN
+            val blockSec = blockFrames / sampleRate.toDouble()
+            val lo = max(1, Math.floor((t - windowSec) / blockSec).toInt() - 1)
+            val hi = min(odf.size - 2, Math.ceil((t + windowSec) / blockSec).toInt() + 1)
+            var bestTime = Double.NaN
+            var bestValue = 0.0
+            for (k in lo..hi) {
+                val v = odf[k]
+                if (v <= bestValue || v < odf[k - 1] || v <= odf[k + 1]) continue
+                val time = (k + 0.5 + parabolicOffset(odf[k - 1], v, odf[k + 1])) * blockSec
+                if (abs(time - t) > windowSec) continue
+                bestTime = time; bestValue = v
+            }
+            return if (bestValue >= peakFraction * peak) bestTime else Double.NaN
+        }
+    }
+
+    /** [Attacks] of [buffer]'s mono mix on 1 ms blocks. */
+    fun attacks(buffer: AudioBuffer): Attacks {
+        val sr = buffer.sampleRate
+        val block = msFrames(1.0, sr)
+        val envelope = analyticEnvelope(mono(buffer))
+        val n = blockCount(envelope.size, block)
+        val env = DoubleArray(n) { b -> var acc = 0.0; for (i in b * block until (b + 1) * block) acc += envelope[i]; acc / block }
+        val lookBack = max(1, Math.round(RISE_LOOKBACK_MS).toInt())
+        val odf = DoubleArray(n)
+        for (k in 1 until n) {
+            var before = 0.0
+            for (j in max(0, k - lookBack) until k) if (env[j] > before) before = env[j]
+            odf[k] = max(0.0, env[k] - before)
+        }
+        return Attacks(odf, block, sr)
+    }
+
+    /** How far back (1 ms blocks) [attacks] looks for the level an attack must exceed. */
+    const val RISE_LOOKBACK_MS = 20.0
+    /** An attack weaker than this fraction of the buffer's strongest does not count (the old onset detector's threshold). */
+    const val ATTACK_PEAK_FRACTION = 0.1
+
+    /**
+     * Magnitude of the analytic signal `x + i·H(x)` (H = Hilbert transform): the envelope of [x] without the
+     * waveform's own ripple. Computed with the `dsp` [Fft] in overlapping [HILBERT_FFT]-point segments; each
+     * segment contributes only its middle, [HILBERT_MARGIN] frames away from its edges. The truncated Hilbert kernel
+     * (it decays as `1 / (pi n)`) costs most at low frequencies: on a 55 Hz sine of amplitude 0.5 the envelope stays
+     * within 0.0014 of 0.5 more than a second from the buffer's ends (`AttacksTest`). Frames outside [x] count as
+     * silence, so the envelope sags near the ends of a buffer that does not start or end in silence.
+     */
+    fun analyticEnvelope(x: FloatArray): FloatArray {
+        val n = x.size
+        val out = FloatArray(n)
+        if (n == 0) return out
+        val size = HILBERT_FFT
+        val margin = HILBERT_MARGIN
+        val hop = size - 2 * margin
+        val fft = Fft(size)
+        val re = FloatArray(size); val im = FloatArray(size)
+        var start = 0
+        while (start < n) {
+            val from = start - margin
+            for (i in 0 until size) { val j = from + i; re[i] = if (j in 0 until n) x[j] else 0f; im[i] = 0f }
+            fft.forward(re, im)
+            // Analytic spectrum: keep DC and Nyquist, double the positive frequencies, drop the negative ones.
+            for (k in 1 until size / 2) { re[k] *= 2f; im[k] *= 2f }
+            for (k in size / 2 + 1 until size) { re[k] = 0f; im[k] = 0f }
+            fft.inverse(re, im)
+            val m = min(hop, n - start)
+            for (i in 0 until m) { val a = re[margin + i]; val b = im[margin + i]; out[start + i] = sqrt(a * a + b * b) }
+            start += hop
+        }
         return out
     }
+
+    /** FFT size of [analyticEnvelope] (the largest the `dsp` [Fft] supports). */
+    const val HILBERT_FFT = 65536
+    /** Frames discarded at each end of an [analyticEnvelope] segment (372 ms at 44.1 kHz). */
+    const val HILBERT_MARGIN = 16384
 
     /** Vertex offset in `[-0.5, 0.5]` of the parabola through `(-1, yPrev), (0, y), (1, yNext)`. */
     fun parabolicOffset(yPrev: Double, y: Double, yNext: Double): Double {

@@ -4,6 +4,8 @@ import dev.muisc.analysis.model.Mode
 import dev.muisc.transitions.Params
 import dev.muisc.transitions.RenderContext
 import dev.muisc.transitions.strategies.BeatDomainTestSupport as T
+import kotlin.math.abs
+import kotlin.math.max
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -54,12 +56,10 @@ class BassSwapStrategyTest {
         assertEquals(beats[32], rendered.markers[3].frame, "A gone after the 8-bar overlap")
         assertTrue(plan.lanes.map { it.id }.containsAll(listOf("masterBeat", "masterBpm", "lowA", "lowB", "midHighA", "midHighB")))
         assertEquals(1.0, rendered.report.ratioTrace.last().toDouble(), 0.002, "B at ratio 1.0 before the seam")
-        // Kicks of both decks sit on the master beats.
-        // Both decks run through the LR4 3-band crossover, whose all-pass sum rotates the phase a full turn at the
-        // splits: a 50 Hz kick comes out ~2.6 ms late compared with the dry deck the bias is measured on. That is the
-        // crossover's group delay, not a grid error (the master grid itself is exact), so the budget here is 6 ms.
-        T.assertAligned("B kicks", T.kickAlignment(rendered, 0 until 48, pair.b.audio, T.beatFrames(pair.b, 16, 80)), maxMedianMs = 6.0)
-        T.assertAligned("A kicks", T.kickAlignment(rendered, 0 until 32, pair.a.audio, T.beatFrames(pair.a, 16, 80), toleranceMs = 6.0), maxMedianMs = 4.0)
+        // Kicks of both decks sit on the master beats. The 3-band EQ is zero-phase, so the budgets are those of
+        // beatMatchedBlend's dry decks (they were 6 ms while the causal LR4 crossover delayed both decks by ~2.5 ms).
+        T.assertAligned("B kicks", T.kickAlignment(rendered, 0 until 48, pair.b.audio, T.beatFrames(pair.b, 16, 80), toleranceMs = 3.0), maxMedianMs = 2.0)
+        T.assertAligned("A kicks", T.kickAlignment(rendered, 0 until 32, pair.a.audio, T.beatFrames(pair.a, 16, 80), toleranceMs = 3.0), maxMedianMs = 2.0)
         // swapBeats stretches the handover.
         val slow = strategy.plan(pair.a.analysis, pair.b.analysis, pair.features, short.with("swapBeats", 4), pair.prefs, 1)
         val slowRender = strategy.render(pair.input(slow), RenderContext(pair.prefs, 1))
@@ -92,5 +92,55 @@ class BassSwapStrategyTest {
         var diff = 0.0; var ref = 0.0
         for (i in 0 until 4096) { val s = aOnly.audio[0][mid.toInt() + i] + bOnly.audio[0][mid.toInt() + i]; val d = s - full.audio[0][mid.toInt() + i]; diff += d * d; ref += s * s }
         assertTrue(diff < ref * 1e-4, "A + B contributions add up to the mix (rel. error ${diff / ref})")
+    }
+
+    /**
+     * The 3-band EQ must not move either deck in time. With an all-pass-compensated LR4 crossover (the bands sum to
+     * `AP(lowHz) AP(highHz) x`) both decks came out ~2.5 ms (≈ 111 frames) late against the phase-locked deck and
+     * the dry guard regions, and the kick's attack was rotated into a ramp. With the zero-phase split the bands sum
+     * to the deck itself: where a deck's band gains are equal the render IS the phase-locked deck.
+     */
+    @Test
+    fun theEqMixKeepsBothDecksOnTheirPhaseLockedTiming() {
+        val (plan, loud, _) = render(pair, short)
+        // 12 dB down so the true-peak limiter never engages and a sample comparison is meaningful (the render is linear).
+        fun quiet(x: dev.muisc.audio.AudioBuffer) = x.copy().also { q -> for (c in q.channels) for (i in c.indices) c[i] *= 0.25f }
+        val input = dev.muisc.transitions.TransitionInput(loud.plan, loud.a, loud.b, loud.features, quiet(loud.aAudio), quiet(loud.bAudio), loud.stems)
+        val ctx = RenderContext(pair.prefs, 1)
+        val aOnly = strategy.render(T.silenced(input, silenceA = false, silenceB = true), ctx)
+        val bOnly = strategy.render(T.silenced(input, silenceA = true, silenceB = false), ctx)
+        val layout = BeatDomain.resolveLayout(plan, input.aAnalysis, input.bAnalysis, input.features, pair.prefs)
+        val decks = BeatDomain.Render(input, ctx, layout)
+        val dryA = decks.renderA()
+        val dryB = decks.renderB()
+        val g = layout.g
+        val beats = T.masterBeatFrames(bOnly)
+        assertEquals(0.0, aOnly.report.metrics["limited"], "no limiter in the way of a sample comparison")
+        assertEquals(0.0, bOnly.report.metrics["limited"], "no limiter in the way of a sample comparison")
+
+        // Before the swap A's low band is at unity and its mids/highs fade: A's kicks must still be where the
+        // phase-locked deck puts them (cross-correlation lag of 50 ms windows at each master beat).
+        val lags = IntArray(layout.aBeats / 2) { k -> lagFrames(dryA[0], aOnly.audio[0], beats[k].toInt() - g, g, 2205, 400) }
+        assertTrue(lags.all { abs(it) <= 1 }, "A through the EQ lags its phase-locked deck by ${lags.toList()} frames")
+        val lagsB = IntArray(layout.totalBeats - layout.aBeats) { k -> lagFrames(dryB[0], bOnly.audio[0], beats[layout.aBeats + k].toInt() - g, g, 2205, 400) }
+        assertTrue(lagsB.all { abs(it) <= 1 }, "B through the EQ lags its phase-locked deck by ${lagsB.toList()} frames")
+
+        // After A is gone every band of B is at unity: the render is B's phase-locked deck, sample for sample
+        // (up to the tail's seam blend into the dry post-roll).
+        val from = beats[layout.aBeats].toInt(); val to = beats[layout.totalBeats].toInt() - BeatDomain.SEAM_BLEND_FRAMES
+        var worst = 0.0
+        for (c in 0 until 2) for (i in from until to) worst = max(worst, abs((bOnly.audio[c][i] - dryB[c][i - g]).toDouble()))
+        assertTrue(worst < 1e-4, "B after the swap differs from its phase-locked deck by up to $worst")
+    }
+
+    /** Lag (frames, positive = [y] later) that best aligns `y[at + offset ...]` with `x[at ...]` over [win] frames. */
+    private fun lagFrames(x: FloatArray, y: FloatArray, at: Int, offset: Int, win: Int, maxLag: Int): Int {
+        var best = Double.NEGATIVE_INFINITY; var bestLag = 0
+        for (lag in -maxLag..maxLag) {
+            var s = 0.0
+            for (i in at until at + win) { val j = i + offset + lag; if (i in x.indices && j in y.indices) s += x[i].toDouble() * y[j] }
+            if (s > best) { best = s; bestLag = lag }
+        }
+        return bestLag
     }
 }

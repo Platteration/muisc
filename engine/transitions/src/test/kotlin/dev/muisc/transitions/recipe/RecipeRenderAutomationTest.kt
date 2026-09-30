@@ -74,4 +74,34 @@ class RecipeRenderAutomationTest {
         assertTrue(maxDiff(6.1, 7.4) == 0f, "B untouched after the high-pass is parked again (max diff ${maxDiff(6.1, 7.4)})")
         assertTrue(maxDiff(4.9, 5.1) > 1e-3f, "while the high-pass is up B is filtered")
     }
+
+    /**
+     * An EQ back at 0 dB on all three bands leaves the deck as it is — not an all-pass copy of it. The EQ's bands are
+     * zero-phase and sum to the deck; the causal LR4 crossover it replaced delayed the whole deck by ~2.5 ms at a
+     * 200 Hz split for as long as any band lane was automated.
+     */
+    @Test
+    fun anEqBackAtUnityIsTransparent() {
+        val pair = RecipeRenderTestSupport.near
+        val rec = recipe(
+            "bass-in", RecipeTempo.NONE,
+            DeckRecipe(level = listOf(pt(0, 1, RecipeCurve.EQUAL_POWER), pt(4, 0))),
+            // B at exactly half level (as above: keeps the limiter away from the compared bars), its low band cut
+            // until bar 3.
+            DeckRecipe(level = listOf(pt(0, 0, RecipeCurve.EQUAL_POWER), pt(2, 0.5), pt(7.5, 0.5), pt(8, 1)), low = listOf(pt(0, -24), pt(3, 0))),
+            length = 4, hold = 4,
+        )
+        val bOnly = render(rec, pair, silenceA = true)
+        assertContract("bass-in", bOnly)
+        val bOff = bOnly.plan.bEntryOffset.toLong() - bOnly.plan.expectedOutputFrames
+        fun maxDiff(fromBar: Double, toBar: Double): Float {
+            val from = outFrame(bOnly, pair, rec, fromBar).toInt()
+            val to = outFrame(bOnly, pair, rec, toBar).toInt()
+            var m = 0f
+            for (c in 0 until 2) for (i in from until to) m = maxOf(m, abs(bOnly.out.audio[c][i] - 0.5f * bOnly.input.bAudio[c][(bOff + i).toInt()]))
+            return m
+        }
+        assertTrue(maxDiff(3.1, 7.4) < 1e-5f, "B untouched once its low band is back at 0 dB (max diff ${maxDiff(3.1, 7.4)})")
+        assertTrue(maxDiff(2.0, 2.5) > 1e-3f, "while the low band is cut B is equalised")
+    }
 }

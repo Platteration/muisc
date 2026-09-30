@@ -9,6 +9,7 @@ import dev.muisc.transitions.TempoRelation
 import dev.muisc.transitions.TransitionInput
 import dev.muisc.transitions.core.MasterGrid
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
@@ -54,7 +55,8 @@ object ArtifactMetrics {
     const val SEAM_IDENTITY = "seamIdentity"
     const val SEAM_CORRELATION = "seamCorrelation"
     const val BEAT_ALIGNMENT_MS = "beatAlignmentMs"
-    const val BEAT_ALIGNMENT_MAX_MS = "beatAlignmentMaxMs"
+    /** 90th percentile (nearest rank) of the beat-alignment errors; it replaced `beatAlignmentMaxMs`, see [beatAlignment]. */
+    const val BEAT_ALIGNMENT_P90_MS = "beatAlignmentP90Ms"
     const val LOUDNESS_SMOOTHNESS = "loudnessSmoothness"
     const val STEREO_CORRELATION_MIN = "stereoCorrelationMin"
     const val TAIL_CONTAINED_DB = "tailContainedDb"
@@ -163,8 +165,12 @@ object ArtifactMetrics {
     const val SEAM_FRAMES = 2048
     const val TAIL_MS = 100.0
     const val STEREO_WINDOW_MS = 400.0
-    /** Beats farther than this from any detected onset are counted as unmatched instead of as a huge error. */
-    const val BEAT_MATCH_WINDOW_MS = 100.0
+    /**
+     * Half-width of the window around a master beat in which [beatAlignment] looks for the render's attack and the
+     * sources' (it used to match the nearest onset within 100 ms). An offset up to this size is measured as what it
+     * is; at 126 BPM the nearest off-beat hat is 238 ms away.
+     */
+    const val BEAT_ATTACK_WINDOW_MS = 50.0
     /** Half-width of the window [evaluateProgramOutput] inspects around a program seam. */
     const val SEAM_WINDOW_MS = 50.0
 
@@ -204,7 +210,7 @@ object ArtifactMetrics {
         out += nanInf(audio)
         out += silenceGap(audio)
         seamMetrics(rendered, input).forEach { out += it }
-        beatAlignment(rendered, masterBeats ?: planMasterBeats(rendered)).forEach { out += it }
+        beatAlignment(rendered, masterBeats ?: planMasterBeats(rendered), input).forEach { out += it }
         out += loudnessSmoothness(audio)
         stereoCorrelation(audio)?.let { out += it }
         out += tailContained(rendered, input)
@@ -451,34 +457,69 @@ object ArtifactMetrics {
     }
 
     /**
-     * Onsets of the render (1 ms ODF with parabolic sub-block interpolation) matched to the master beat times:
-     * median and maximum absolute distance in milliseconds. Beats with no onset within
-     * [BEAT_MATCH_WINDOW_MS] are not counted; when nothing matches, no metric is produced.
+     * Beat alignment of a beat-domain render: over the master beats the render **articulates**, the median
+     * ([BEAT_ALIGNMENT_MS]) and the 90th percentile ([BEAT_ALIGNMENT_P90_MS], nearest rank: with fewer than 10
+     * counted beats that is the maximum) of the distance in milliseconds between the render's attack and the
+     * sources' attacks the grids put there.
+     *
+     * For a master beat at output time `t`:
+     *  - the render's attack is the strongest [Signals.Attacks] peak within `t ±` [BEAT_ATTACK_WINDOW_MS]. When it is
+     *    weaker than [Signals.ATTACK_PEAK_FRACTION] of the render's strongest attack the render does not articulate
+     *    the beat, and the beat is not counted;
+     *  - with [input], every attack of each source (at least that fraction of the source's strongest) within the
+     *    same window around the beat's position in that source - through its beat grid for a render that publishes
+     *    [MASTER_BEAT_LANE] ([MasterBeatMap]), else through the splice contract's constant offsets - is mapped back
+     *    to output time. A beat at which neither source has an attack is not counted; otherwise the error is the
+     *    distance from the render's attack to the nearest of them;
+     *  - without sources the error is the distance from the render's attack to `t`.
+     *
+     * So the metric asks whether the render plays the decks' attacks where their beat grids and the master grid say
+     * they belong: a deck early or late against the grid - and so against the other deck - is exactly that. It does
+     * not re-judge the analysis (an attack a source has off its own grid is compared with itself; grid accuracy is
+     * `muisc bench analysis`'s job), and it does not count beats on which neither the render nor a source has an
+     * attack, which the previous version (nearest onset of a 1 ms-RMS detector within 100 ms, maximum over all
+     * beats) paired with unrelated events up to 100 ms away. The percentile is there because a mix can have an attack
+     * neither source has where two decks' material sums (on `bassSwap t120C -> t126Am` one beat's strongest rise is
+     * 36 ms after the beat and 33.5 ms from the nearest source attack; on `stemSwap t120C -> t63G` three beats of 45
+     * read 39-47 ms that way), and a few such beats are not a timing error, while a deck that is off is off on many
+     * beats. When no beat counts, no metric is produced.
      *
      * Only beat-domain renders have master beats at all - see [MASTER_BEAT_LANE].
      */
-    fun beatAlignment(rendered: RenderedTransition, masterBeats: DoubleArray?): List<Metric> {
+    fun beatAlignment(rendered: RenderedTransition, masterBeats: DoubleArray?, input: TransitionInput? = null): List<Metric> {
         if (masterBeats == null || masterBeats.isEmpty()) return emptyList()
         val audio = rendered.audio
-        val onsets = Signals.onsetTimesSec(audio)
-        if (onsets.isEmpty()) return emptyList()
-        val duration = audio.durationSec
-        val window = BEAT_MATCH_WINDOW_MS / 1000.0
+        val sr = audio.sampleRate
+        val window = BEAT_ATTACK_WINDOW_MS / 1000.0
+        val render = Signals.attacks(audio)
+        val sources = input?.let { SourceClock.of(rendered, it) }
+        val aAttacks = sources?.let { Signals.attacks(input.aAudio) }
+        val bAttacks = sources?.let { Signals.attacks(input.bAudio) }
         val errors = ArrayList<Double>(masterBeats.size)
         for (t in masterBeats) {
-            if (t < 0.0 || t > duration) continue
-            var best = Double.MAX_VALUE
-            for (o in onsets) { val d = abs(o - t); if (d < best) best = d }
-            if (best <= window) errors += best * 1000.0
+            if (t < 0.0 || t > audio.durationSec) continue
+            val attack = render.strongestNear(t, window)
+            if (attack.isNaN()) continue
+            if (sources == null) { errors += abs(attack - t) * 1000.0; continue }
+            val o = t * sr
+            var nearest = Double.MAX_VALUE
+            for ((clock, attacks) in listOf(sources.a to aAttacks!!, sources.b to bAttacks!!)) {
+                val at = clock.sourceFrame(o) ?: continue
+                for (found in attacks.allNear(at / sr, window)) {
+                    val back = clock.outputFrame(found * sr) ?: continue
+                    nearest = min(nearest, abs(attack - back / sr))
+                }
+            }
+            if (nearest != Double.MAX_VALUE) errors += nearest * 1000.0
         }
         if (errors.isEmpty()) return emptyList()
         val arr = DoubleArray(errors.size) { errors[it] }
         val median = Signals.median(arr)
-        var worst = 0.0
-        for (v in arr) if (v > worst) worst = v
+        arr.sort()
+        val p90 = arr[ceil(0.90 * arr.size).toInt() - 1]
         return listOf(
             Metric.upper(BEAT_ALIGNMENT_MS, median, "ms", BEAT_ALIGNMENT_WARN_MS, Double.NaN),
-            Metric.upper(BEAT_ALIGNMENT_MAX_MS, worst, "ms", BEAT_ALIGNMENT_WARN_MS, BEAT_ALIGNMENT_FAIL_MS),
+            Metric.upper(BEAT_ALIGNMENT_P90_MS, p90, "ms", BEAT_ALIGNMENT_WARN_MS, BEAT_ALIGNMENT_FAIL_MS),
         )
     }
 
@@ -623,6 +664,39 @@ object ArtifactMetrics {
     }
 
     /**
+     * Both directions between output frames and each source window's frames, for [beatAlignment]: through the
+     * [MasterBeatMap] of a beat-domain render, else through the splice contract's constant offsets. A frame the
+     * render never plays, or a source position outside the decoded window, is null.
+     */
+    private class SourceClock(val a: Deck, val b: Deck) {
+        class Deck(private val frames: Int, private val toSource: (Double) -> Double?, private val toOutput: (Int) -> Int) {
+            fun sourceFrame(outputFrame: Double): Double? = toSource(outputFrame)?.takeIf { it >= 0.0 && it < frames }
+            fun outputFrame(sourceFrame: Double): Double? {
+                val f = Math.round(sourceFrame).toInt()
+                if (f < 0 || f >= frames) return null
+                return toOutput(f).takeIf { it >= 0 }?.toDouble()
+            }
+        }
+
+        companion object {
+            fun of(rendered: RenderedTransition, input: TransitionInput): SourceClock {
+                val plan = rendered.plan
+                val frames = rendered.audio.frames
+                val beats = MasterBeatMap.of(rendered, input)
+                val aFrames = input.aAudio.frames
+                val bFrames = input.bAudio.frames
+                return if (beats != null) SourceClock(
+                    Deck(aFrames, { beats.aSourceFrame(it) }, { beats.aOutputFrame(it) }),
+                    Deck(bFrames, { beats.bSourceFrame(it) }, { beats.bOutputFrame(it) }),
+                ) else SourceClock(
+                    Deck(aFrames, { it + plan.aExitOffset }, { it - plan.aExitOffset }),
+                    Deck(bFrames, { it - frames + plan.bEntryOffset }, { it + frames - plan.bEntryOffset }),
+                )
+            }
+        }
+    }
+
+    /**
      * Where a source frame is heard in a **beat-domain** render, i.e. one that publishes [MASTER_BEAT_LANE].
      *
      * Such a render keeps the splice contract at its two ends - output `[0, lane[0])` is A's dry pre-roll and
@@ -674,6 +748,29 @@ object ArtifactMetrics {
                 m < first -> -1
                 else -> outputFrameOf(m)
             }
+        }
+
+        /** A's window frame heard at output frame [o] (the inverse of [aOutputFrame]), or null after master beat K. */
+        fun aSourceFrame(o: Double): Double? {
+            if (o < masterFrames[0]) return o + aExitOffset
+            if (o > masterFrames[masterFrames.size - 1]) return null
+            return a.frameOfBeat(aBeatAtMasterStart + (masterBeatAt(o) - first)) / aToGrid - aWindowStart
+        }
+
+        /** B's window frame heard at output frame [o] (the inverse of [bOutputFrame]), or null before master beat 0. */
+        fun bSourceFrame(o: Double): Double? {
+            if (o > masterFrames[masterFrames.size - 1]) return o - bPostRollOffset
+            if (o < masterFrames[0]) return null
+            return b.frameOfBeat(bBeatAtMasterEnd - (last - masterBeatAt(o)) * bBeatsPerMasterBeat) / bToGrid - bWindowStart
+        }
+
+        /** Fractional master beat at output frame [o] (`masterFrames[0] <= o <= masterFrames.last()`). */
+        private fun masterBeatAt(o: Double): Double {
+            var lo = 0
+            var hi = masterFrames.size - 1
+            while (hi - lo > 1) { val mid = (lo + hi) ushr 1; if (masterFrames[mid] <= o) lo = mid else hi = mid }
+            val t = (o - masterFrames[lo]) / (masterFrames[hi] - masterFrames[lo])
+            return masterBeats[lo] + t * (masterBeats[hi] - masterBeats[lo])
         }
 
         /** Output frame of the fractional master beat [m] (`first <= m <= last`), linear between lane points. */

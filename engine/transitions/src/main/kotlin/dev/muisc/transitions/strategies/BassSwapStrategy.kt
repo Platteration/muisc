@@ -2,7 +2,7 @@ package dev.muisc.transitions.strategies
 
 import dev.muisc.analysis.model.TrackAnalysis
 import dev.muisc.audio.AudioBuffer
-import dev.muisc.dsp.filter.MultibandCrossover
+import dev.muisc.dsp.filter.ZeroPhaseCrossover
 import dev.muisc.transitions.Applicability
 import dev.muisc.transitions.FadeLaw
 import dev.muisc.transitions.Marker
@@ -30,10 +30,10 @@ import kotlin.math.min
  * the classic "one bassline at a time" rule, so the two kicks and basslines never fight for the sub. After A is
  * gone B rides back to its own tempo ([P.settleBars]) and holds it ([P.holdBars]) so the seam is at ratio 1.0.
  *
- * **DSP.** Both rendered decks are split into 3 bands with the `dsp` [MultibandCrossover] (Linkwitz-Riley 4th
- * order at [P.lowHz] / [P.highHz], all-pass compensated: the bands sum flat). Per band, per deck, one gain lane;
- * the bands are summed. The crossover's all-pass phase rotation is the only difference to the dry guard regions,
- * bridged by the linear seam blend of [BeatDomain] (a 23 ms partial notch at the crossover frequencies, inaudible).
+ * **DSP.** Both rendered decks are split into 3 bands with the `dsp` [ZeroPhaseCrossover] (Linkwitz-Riley 4th
+ * order magnitudes at [P.lowHz] / [P.highHz], zero phase: the bands sum to the deck sample-exactly). Per band, per
+ * deck, one gain lane; the bands are summed. Where a deck's band gains agree the render is the phase-locked deck
+ * itself, so the EQ moves no beat: the kicks stay on the master grid and on the dry guard regions' timing.
  *
  * **When the planner picks it.** As `beatMatchedBlend` (beat-matchable, stretch within the limit, room), and it
  * scores higher when both tracks carry real low end (`lowEndShareA/B`): a swap of nothing is pointless. The
@@ -43,10 +43,11 @@ import kotlin.math.min
  * `lowHz` 200 (60–400), `highHz` 4000 (1000–10000), `midHighLaw` EQUAL_POWER, `swapLaw` EQUAL_POWER,
  * `entryOffsetBars` 0, `settleBars` 2, `holdBars` 2.
  *
- * **Failure modes.** The LR4 sum is all-pass, not linear-phase: it rotates the phase a full turn at each split, which
- * delays a 50 Hz kick by roughly 2.5 ms relative to the dry deck (a DJ mixer's EQ does exactly the same, and both
- * decks are delayed equally, so nothing drifts apart — but a beat-alignment metric measured against the dry source
- * must allow for it). Two heavy sub-bass tracks still overlap for `swapBeats` at the swap (the swap is deliberately
+ * **Failure modes.** The zero-phase split is non-causal: a band that is gained differently from the others starts
+ * to rise a couple of milliseconds before its transient (a symmetric pre-ring, not a timing offset). Until 2026-09
+ * the split was the causal all-pass-compensated [dev.muisc.dsp.filter.MultibandCrossover], whose sum
+ * `AP(lowHz) AP(highHz) x` delayed both decks by ~2.5 ms against the dry guard regions and turned each kick's
+ * attack into a ramp. Two heavy sub-bass tracks still overlap for `swapBeats` at the swap (the swap is deliberately
  * short); wrong downbeat phase puts the swap on a weak beat; a track whose "bass" lives above `lowHz` (e.g. a
  * bass guitar with little sub) is only partly swapped — lower `lowHz` or use `beatMatchedBlend`.
  */
@@ -128,16 +129,16 @@ class BassSwapStrategy : TransitionStrategy {
         val edges = doubleArrayOf(p.double(P.lowHz), p.double(P.highHz))
         ctx.progress(0.05)
 
-        // Deck A: split (crossover warmed on the dry pre-roll), gain per band, sum, seam-blend into the pre-roll.
+        // Deck A: split, gain per band, sum, seam-blend into the pre-roll.
         val a = r.renderA()
         ctx.progress(0.35)
-        val aMix = splitAndGain(a, edges, g, listOf(lowA, midHighA, midHighA), warmup = r.dryPreRoll())
+        val aMix = splitAndGain(a, edges, g, listOf(lowA, midHighA, midHighA))
         r.blendHead(aMix)
 
         // Deck B: split, gain per band, sum, seam-blend into the post-roll.
         val b = r.renderB()
         ctx.progress(0.75)
-        val bMix = splitAndGain(b, edges, g, listOf(lowB, midHighB, midHighB), warmup = null)
+        val bMix = splitAndGain(b, edges, g, listOf(lowB, midHighB, midHighB))
         r.blendTail(bMix)
 
         val audio = r.assemble(aMix, null, bMix, null)
@@ -173,24 +174,19 @@ class BassSwapStrategy : TransitionStrategy {
         return listOf(lowA, lowB, midHighA, midHighB)
     }
 
-    /** LR4 3-band split of [x] (state primed with [warmup]), each band scaled by its lane (sampled at output frames `frameOffset + i`), summed. */
-    private fun splitAndGain(x: AudioBuffer, edges: DoubleArray, frameOffset: Long, gains: List<Lane>, warmup: Array<FloatArray>?): AudioBuffer {
+    /** Zero-phase LR4 3-band split of [x], each band scaled by its lane (sampled at output frames `frameOffset + i`), summed. */
+    private fun splitAndGain(x: AudioBuffer, edges: DoubleArray, frameOffset: Long, gains: List<Lane>): AudioBuffer {
         val ch = x.channelCount
         val n = x.frames
-        val xo = MultibandCrossover(x.sampleRate, ch, edges)
-        if (warmup != null && warmup[0].isNotEmpty()) {
-            val scratch = Array(xo.bands) { Array(ch) { FloatArray(warmup[0].size) } }
-            xo.process(warmup, scratch, warmup[0].size)
-        }
-        val bands = Array(xo.bands) { Array(ch) { FloatArray(n) } }
-        xo.process(x.channels, bands, n)
+        val bands = Array(edges.size + 1) { FloatArray(n) }
         val out = Array(ch) { FloatArray(n) }
         val scratch = FloatArray(4096)
-        for (band in 0 until xo.bands) {
-            val lane = gains[band]
-            for (c in 0 until ch) {
-                lane.applyInPlace(bands[band][c], frameOffset, 0, n, scratch)
-                val y = out[c]; val s = bands[band][c]
+        for (c in 0 until ch) {
+            ZeroPhaseCrossover.split(x[c], n, x.sampleRate, edges, bands)
+            val y = out[c]
+            for (band in bands.indices) {
+                val s = bands[band]
+                gains[band].applyInPlace(s, frameOffset, 0, n, scratch)
                 for (i in 0 until n) y[i] += s[i]
             }
         }

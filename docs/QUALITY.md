@@ -22,7 +22,7 @@ These are numbers for the synthetic fixtures only. To score the planner's picks 
 | `levelJumpDb` | Short-term RMS jump not explained by a source onset | 6 dB |
 | `truePeakDbtp` | Inter-sample peak of the render | above -0.5 dBTP |
 | `seamIdentity` | The render's first/last frames must equal the deck-gained source samples | mismatch |
-| `beatAlignmentMs` / `beatAlignmentMaxMs` | Detected onsets in the render against the master beat grid — **beat-domain renders only** (see below) | median 5 ms / max 12 ms |
+| `beatAlignmentMs` / `beatAlignmentP90Ms` | Per master beat, the render's attack against the sources' attacks their beat grids put there, over the beats that have one — **beat-domain renders only** (see below and fixed item 9) | median: WARN 5 ms / 90th percentile: WARN 5 ms, FAIL 12 ms |
 | `loudnessSmoothness` | Second derivative of short-term loudness; WARN only, never a FAIL | 3 LU/s² |
 | `tailContainedDb` | Effect tails must not spill past the segment | audible spill |
 
@@ -159,6 +159,99 @@ t126Am's `mixOutBeat` at beat 16 of 64, at the start of its DROP section rather 
    `ArtifactMetricsTest.aLevelStepInsideABeatDomainBlendIsStillDetected`,
    `TempoGlideModifierTest.strategiesWithTheirOwnGridKeepTheirBodyUnderAGlide`.
 
+8. **`bassSwap` and the recipes' EQ delayed both decks by 2.5 ms** (known failure 2's "real offset"). A real
+   defect, smaller than the 14.3 ms median said, and the rest of that median was the metric (item 9).
+   - *Which deck, how much, constant or drifting*: both, equally, constant. On the `BassSwapStrategyTest` pair
+     (120 → 126 BPM, defaults) the render of each deck alone lagged the same deck rendered by `PhaseLockedDeck`
+     alone by 101–115 frames (2.3–2.6 ms, cross-correlation of 50 ms windows at every master beat): A 110–115 on
+     master beats 0–31, B 101–113 on master beats 0–47, no drift over the overlap. A and B were therefore never
+     apart; each was late against the master grid and against the dry pre-roll and post-roll it is spliced
+     between. The phase-locked decks, the stretcher and the grid were not involved: the same decks without the
+     EQ are what the new test compares against, and `beatMatchedBlend` on the same layout reads 0.18 ms median /
+     0.50 ms 90th percentile on `t120C → t126Am` (item 9's metric).
+   - *Cause*: the 3-band split was `dsp`'s causal `MultibandCrossover`, whose bands sum to
+     `AP(lowHz) AP(highHz) x`, an all-pass: flat in magnitude, but a 2nd-order all-pass at 200 Hz has 2.25 ms of
+     group delay at and below its corner, which is where a kick lives. So the EQ delayed the whole deck even with
+     every band at unity, and rotated each kick's attack into a ramp. The recipes' 3-band EQ
+     (`RecipeRenderer.equalise`, used by `smooth-blend`, `club-bass-swap`, `long-glide`, `radio-segue` and any
+     recipe that automates `low`/`mid`/`high`) was the same crossover.
+   - *Fix*: a new `dsp` `ZeroPhaseCrossover`: per split, the Butterworth section of the LR4 low-pass run forward
+     and backward over the whole deck (the same zero-phase design `PseudoStemSeparator` already uses), and the
+     rest by subtraction. Same band magnitudes as before, no phase, and the bands sum back to the deck, so with
+     equal band gains the render is the phase-locked deck sample for sample (max difference < 1e-4 in the test).
+     Price: a band gained differently from the others starts rising ~2 ms before its transient (the 200 Hz low
+     band's impulse response is above 10 % of its peak for 2.1 ms either side). `bassSwap` no longer warms its
+     crossover on the dry pre-roll: with the sum exact there is no start-up transient to hide where the lanes
+     agree. The real-time fallback (`LiveGraph`, and `LiveOffline` which mirrors it) keeps the causal
+     crossover, as it must; nothing there was changed.
+   - *Measured* (`ab --all`, old metric, before → after this fix alone), median / max beat alignment:
+     `bassSwap` 14.29 / 72.19 → 12.95 / 97.39 on `t120C → t126Am` and 10.73 / 73.77 → 1.06 / 53.31 on
+     `t126_Am → t120_C`; `smooth-blend` 19.63 → 1.79 and 4.07 → 1.09 (medians), `club-bass-swap` 22.09 → 11.09 and
+     6.98 → 1.11, `long-glide` 14.65 → 2.10 and 4.01 → 1.05. What the old metric still read on `bassSwap
+     t120C → t126Am` is item 9. Other metrics this moved, base → final build on the same pairs: `tailContainedDb`
+     -16.89 → -152.18 dB (`bassSwap`, `t120C → t126Am`) and -55.20 → -114.85 dB (`t126_Am → t120_C`), -17.35 →
+     -36.71 dB on the three EQ recipes on `t120C → t126Am` - the last 100 ms of a render are B's rendered deck
+     blending into dry B, and an all-pass copy of B is not B; `levelJumpDb` see known failure 3; `truePeakDbtp`
+     -0.81 → -0.58 dBTP on `bassSwap` and the EQ recipes on `t120C → t126Am` (both WARN).
+   Regression tests: `BassSwapStrategyTest.theEqMixKeepsBothDecksOnTheirPhaseLockedTiming` (red before: A lagged
+   its phase-locked deck by 85-115 frames at every beat), `RecipeRenderAutomationTest.anEqBackAtUnityIsTransparent`
+   (red before: 0.74 max difference once every band is back at 0 dB), `ZeroPhaseCrossoverTest`,
+   `BeatAlignmentTest.bassSwapIsAsWellAlignedAsTheDryBlend` (red before: 7.21 ms median against 0.87 for
+   `beatMatchedBlend`). `BassSwapStrategyTest.renderIsCleanDeterministicAndBeatLocked` now holds `bassSwap`'s
+   kicks to `beatMatchedBlend`'s budgets (2 ms median, 3 ms tolerance) instead of the 6 ms that allowed for the
+   group delay.
+
+9. **`beatAlignment*` measured the detector, not the render** (metric change: `beatAlignmentMaxMs` is replaced by
+   `beatAlignmentP90Ms`; thresholds unchanged). Three defects, all in how the render's onsets were found and
+   counted:
+   - A 1 ms RMS difference of a 45-155 Hz kick or bassline rises with every half-cycle of the waveform, and the
+     detector kept the strongest rise within 50 ms. On `bassSwap t120C → t126Am` (base build) one beat of 49 read
+     the attack (0.5 ms); 13 read 2.9-3.3 ms and 19 sat in clusters at 6.5, 9.8-10.8, 13.7-14.9, 18.4-19.2 and
+     21.4-22.1 ms - the synthetic kick is a 155 → 45 Hz chirp whose zero crossings fall 3.3, 6.9, 10.7, 14.8, 19.2
+     and 24.0 ms after it starts - and of the other 16 (24-72 ms), 14 were from master beat 28 on, where A is in
+     its drumless outro with B's kick still EQ'd out, and then B in its own. The attack function is now the rise of
+     the *analytic envelope* (no waveform ripple) above its own maximum over the previous 20 ms (kick, bass and
+     pads beat against each other - within a beat of `t126_Am`'s own source the envelope dips by 6 dB and
+     recovers - and a recovery is not an attack), on 1 ms blocks.
+   - Replacement chained: a stronger peak within 50 ms replaced the onset and restarted the 50 ms window, so a run
+     of ever-stronger peaks could carry one onset far from its attack (on `t126_Am → t120_C` master beat 2 read
+     79.7 ms with the analytic envelope and the old grouping; its attack is at +2 ms). Each master beat now takes
+     the strongest attack within ±50 ms of itself.
+   - Every beat counted, including beats nobody plays an attack on (an outro of pads and bass; a deck whose kick
+     is EQ'd out), which the 100 ms window paired with whatever was nearest. A beat now counts only when the render
+     has an attack of at least 10 % of its strongest within ±50 ms *and* a source has one there too; with the
+     sources the error is the distance from the render's attack to the nearest source attack, mapped through the
+     beat grids. So the metric measures whether the render plays the decks' attacks where the grids put them; an
+     attack a source has off its own grid is compared with itself (grid accuracy is `muisc bench analysis`'s
+     job, and a grid error is not caught here).
+   The maximum became the 90th percentile (nearest rank): a mix has attacks neither source has where two decks'
+   material sums - on `bassSwap t120C → t126Am` one beat's strongest rise is 36 ms after the beat and 33.5 ms from
+   the nearest source attack; on `stemSwap t120C → t63G` three beats of 45 read 39-47 ms that way - and a few such
+   beats are not a timing error, while a deck that is off is off on many beats. It did not go blind:
+   `BeatAlignmentTest.oneDeckPlayedLateStillFails` plays B (or A) 15 and 20 ms late in real `beatMatchedBlend`
+   and `bassSwap` renders, sources and plan untouched, and the 90th percentile FAILs every time (B late: 15 / 20
+   ms read to within 1.5 ms); the same renders on time PASS. With the median in place of the percentile, or with
+   beats more than 12 ms from any source attack dropped, that test goes red (both tried). Measured on the
+   fixture pairs, base → this build (median / max before, median / 90th percentile after; `ab --all`):
+
+   | strategy | t120C → t126Am | t126_Am → t120_C | t120C → t63G |
+   |---|---|---|---|
+   | `beatMatchedBlend` | 1.63 / 97.39 → 0.18 / 0.50 | 0.98 / 37.20 → 0.08 / 0.22 | 22.06 / 87.01 → 0.20 / 1.50 |
+   | `bassSwap` | 14.29 / 72.19 → 0.21 / 2.29 | 10.73 / 73.77 → 0.09 / 0.22 | 23.42 / 99.77 → 0.19 / 7.30 |
+   | `stemSwap` | 0.60 / 30.14 → 0.08 / 0.28 | 1.02 / 37.37 → 0.09 / 0.23 | 4.19 / 68.73 → 0.18 / 1.56 |
+   | `drumBreakBridge` | 0.73 / 67.26 → 0.07 / 0.18 | 1.08 / 20.74 → 0.08 / 0.25 | 2.52 / 67.26 → 0.09 / 0.42 |
+   | `harmonicBlend` | 1.97 / 97.39 → 0.14 / 0.36 | 1.01 / 16.76 → 0.07 / 0.23 | 24.31 / 87.01 → 0.26 / 1.50 |
+   | `recipe:smooth-blend` | 19.63 / 74.73 → 0.13 / 0.43 | 4.07 / 73.80 → 0.08 / 0.21 | 22.96 / 99.52 → 0.18 / 1.57 |
+   | `recipe:club-bass-swap` | 22.09 / 74.73 → 0.14 / 0.40 | 6.98 / 66.23 → 0.08 / 0.21 | 20.20 / 99.52 → 0.16 / 3.49 |
+   | `recipe:drums-first` | 1.82 / 87.14 → 0.10 / 0.46 | 1.08 / 36.94 → 0.10 / 0.21 | 14.72 / 80.73 → 0.26 / 4.22 |
+   | `recipe:long-glide` | 14.65 / 64.38 → 0.06 / 0.30 | 4.01 / 93.04 → 0.07 / 0.20 | 20.09 / 96.03 → 0.22 / 2.20 |
+   | `recipe:tension-build` | 10.14 / 87.14 → 0.14 / 0.59 | 2.83 / 36.83 → 0.14 / 0.35 | 4.47 / 82.81 → 0.18 / 0.59 |
+
+   `t126_Am → t120_C` is `muisc synth --bpm 126 --key Am` into `--bpm 120 --key C`. The t120C → t63G column is
+   new here. Regression tests: `BeatAlignmentTest.oneDeckPlayedLateStillFails`,
+   `BeatAlignmentTest.beatsTheRenderDoesNotArticulateAreNotCounted` (red before: four beats 70 ms from any click
+   read as 70.3 ms), `AttacksTest`.
+
 ## Known failures on the fixture set
 
 These are real, reproducible, and open. They are recorded here rather than hidden because the whole point of the
@@ -176,17 +269,11 @@ metrics is to make transition quality measurable while it is tuned.
    sources' own, not against a set of frames. The same limit puts the whole-program `muisc check` at 6.98 dB,
    where there are no sources at all to excuse the tracks' dynamics.
 
-2. **`beatAlignmentMaxMs` on beat-domain strategies** (30–97 ms against a 12 ms budget) — newly visible now that
-   the metric is scoped to the renders it means something for. The medians are excellent (beatMatchedBlend 1.63,
-   harmonicBlend 1.97, stemSwap 0.60, drumBreakBridge 0.73), so the decks *are* locked; the maximum is dominated
-   by master beats that the render does not articulate at all, which the 100 ms search window then pairs with a
-   neighbouring event. A 97 ms outlier next to a 1.6 ms median is not a timing error. `stemSwap`'s maximum moved
-   from 20.05 to 30.14 ms when fixed item 7 changed its render; the two beats behind it (master beats 7 and 18)
-   are paired with events 29–30 ms after the beat, and at both the render follows its source (at beat 18 B's own
-   onset is at +29.1 ms in the source and in the render; at beat 7 the render's envelope is within 2 dB of A's at
-   3 ms resolution). The statistic needs to be
-   robust (a high percentile, or "beats the render actually articulates") before the max is worth believing.
-   `bassSwap` is the one to look at first: its median is 14.3 ms, which is a real offset, not an outlier.
+2. **`beatAlignmentP90Ms` 7.30 ms on `bassSwap t120C → t63G`** (WARN; every other beat-domain render of the three
+   fixture pairs PASSes, see fixed items 8 and 9). Median 0.19 ms: no deck is off. The percentile is scattered
+   single beats where the render's strongest attack is 7–31 ms from the nearest source attack (6 of 52 counted
+   beats at 7.3 ms or more: 7.3, 7.9, 9.3, 13.3, 28.6, 30.8). In the golden corpus (`GoldenCorpusTest`, its own
+   seeds and prefs) `stemSwap t120C_t63G` reads 9.69 ms (WARN). Neither was investigated beyond that.
 
 3. **`levelJumpDb` 5.4–7.0 dB on the beat-domain blends, 10.6–14.4 dB on `drumBreakBridge`** (FAIL at 6). What
    is left once fixed item 7 excuses the kicks and removes the glide's holes, all of it the sources' own dynamics:
@@ -194,7 +281,7 @@ metrics is to make transition quality measurable while it is tuned.
    | strategy | t120C → t126Am before | after | t126_Am → t120_C before | after |
    |---|---|---|---|---|
    | `beatMatchedBlend` | 24.25 | 6.93 | 24.31 | 7.01 |
-   | `bassSwap` | 24.10 | 6.76 | 23.00 | 5.44 |
+   | `bassSwap` | 24.10 | 6.76 (6.93 since fixed item 8) | 23.00 | 5.44 (6.70 since fixed item 8) |
    | `stemSwap` | 29.08 | 5.56 | 25.62 | 6.84 |
    | `drumBreakBridge` | 25.59 | 14.38 | 27.44 | 10.60 |
    | `harmonicBlend` | 27.48 | 6.93 | 24.47 | 6.29 |
@@ -218,12 +305,24 @@ metrics is to make transition quality measurable while it is tuned.
    - The beat-domain recipes on `t120C → t126Am` share the metric fix: `smooth-blend` and `club-bass-swap` 9.64 →
      7.22, `drums-first` 17.21 → 11.93, `long-glide` 19.21 → 5.39, `tension-build` 10.06 → 8.18. What remains on
      them has not been investigated.
+   - The zero-phase EQ of fixed item 8 moved this metric on the renders that use it, both ways (`ab --all`, base →
+     after): `bassSwap` 6.76 → 6.93 (`t120C → t126Am`) and 5.44 → 6.70 (`t126_Am → t120_C`, WARN → FAIL);
+     `smooth-blend` and `club-bass-swap` 7.53 → 8.16 and 4.60/4.66 → 8.38 (`t120C → t63G`, WARN → FAIL);
+     `long-glide` 8.18 → 8.63, 5.60 → 6.18 (WARN → FAIL) and 7.09 → 4.89. The two looked at are steps both renders
+     have, read differently: on `bassSwap t126_Am → t120_C` (30.00 s) a fall reads -15.8, -23.2, -25.9, -27.9 dB in
+     consecutive 10 ms windows, where the base render read -15.8, -20.2, -24.5, -26.9;
+     on `smooth-blend t120C → t63G` (34.96 s) a rise from -24 dB to -15 dB was followed in the base render by a
+     ±3 dB 10 ms ripple (-17.9, -13.5, -19.0, -13.9, …) whose low points held the "post" level of the statistic
+     down, and is followed now by a steady -14.7…-17.3 dB. Neither step is excused as a source onset; that is this
+     item's and known failure 1's mechanism, and it is not fixed here. (7.53 is what the base build measures for
+     `smooth-blend t120C → t126Am` today, not the 7.22 above.)
    - The Lab's 29 dB on `stemSwap` at 34–64 overlap bars could not be reproduced as a long overlap: on the 32- and
      96-bar synthetic 126 → 120 pairs `stemSwap` shortens any `overlapBars` from 34 to 64 to 19 bars ("A has 19
      bars after its phrase start"), and there it measures 25.6 → 6.8 dB; the 29.08 dB on `t120C → t126Am` was the
      silence of fixed item 7.
 
-4. **`truePeakDbtp` above -0.5 dBTP on most strategies** (-0.26 to -0.64). The fixtures themselves peak at
+4. **`truePeakDbtp` above -0.5 dBTP on most strategies** (-0.26 to -0.64; `bassSwap` and the EQ recipes on
+   `t120C → t126Am` read -0.58 since fixed item 8, -0.81 before). The fixtures themselves peak at
    +1.1 dBTP, the CLI's default prefs apply no deck gain, and the splice contract requires the guard regions to
    be the source verbatim — so the limiter is not allowed to bring those frames down, and the metric measures the
    whole render. The player's own master limiter handles this at playback; the metric and the contract disagree
