@@ -544,8 +544,8 @@ class CliSmokeTest {
      * `muisc <cmd> --help`.
      */
     @Test
-    fun `the root registers eval, bench, recipe, preset, style, pin, rate and lab and each answers --help`() {
-        val expected = listOf("eval", "bench", "recipe", "preset", "style", "pin", "rate", "lab")
+    fun `the root registers eval, bench, recipe, preset, style, pin, rate, lab and order and each answers --help`() {
+        val expected = listOf("eval", "bench", "recipe", "preset", "style", "pin", "rate", "lab", "order")
         val names = Muisc().subcommands(allCommands()).registeredSubcommands().map { it.commandName }
         assertEquals(names.distinct(), names, "a command name is registered twice")
         val missing = expected.filter { it !in names }

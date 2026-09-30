@@ -23,6 +23,7 @@ class NoOpEngineController : EngineController {
     override fun previous() {}
     override fun seekTo(positionMs: Long) {}
     override fun setQueue(songs: List<Song>, startIndex: Int, context: PlaybackContext, playNow: Boolean) {}
+    override fun shuffle(songs: List<Song>) {}
     override fun playNext(songs: List<Song>) {}
     override fun addToQueue(songs: List<Song>) {}
     override fun moveQueueItem(from: Int, to: Int) {}

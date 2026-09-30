@@ -666,6 +666,35 @@ exists; for incompatible pairs it is an echo-out, an ambient bridge or a crossfa
 `LivePlanFactory` mirrors the ladder for the live path: `bassSwap` (if `|r−1| ≤ 0.02` and beatMatchable) →
 `filterSweep`/`echoOut` (grid on A) → `phraseCut` (grid + cold B) → `crossfade` (always).
 
+### 5.5 Set sequencing — smart shuffle (`dev.muisc.transitions.sequence`)
+
+The planner makes the best of whatever pair it is given; `SetSequencer` chooses the pairs. It orders a set so
+that every neighbouring pair mixes well, and is used only for SHUFFLE (the app's shuffle with the "Smart shuffle"
+setting on, and turning shuffle on for a non-album queue) and for explicit "order for mixing" requests (`muisc
+order`, `mix --order smart`, `eval --order smart`). An album played in order and a playlist played as written are
+never passed through it.
+
+```
+cost(A→B) = 0.30·(1−s_tempo) + 0.20·(1−s_key) + 0.15·(1−s_energy) + 0.10·(1−s_grid) + 0.10·(1−s_struct[beat-domain])
+          + 0.05·(1−s_room[8 bars]) + 0.10·(1−s_vocal) + 0.25·[no beat-matched move: grid < 0.5, stretch > max, s_room < 0.5]
+objective = Σ [cost + sameArtistPenalty·[same artist] + variety·0.6·u(seed,A,B)] + arcWeight·Σ_k |q(o_k) − arc(k, n)|
+```
+
+`PairCostModel` computes `cost` from `PairFeatures` and the §5.2 sub-scores; a pair with an unanalysed song costs
+0.5 (no information), so such songs are placed but never block. Up to 500 songs (`fullLimit`) the whole order is
+optimised: greedy nearest neighbour from a seeded (or fixed) start, then 2-opt with direction-aware costs and or-opt
+moves of 1–3 songs under a deterministic work budget. Above that, the online mode fills each slot from a pool of 32
+songs sampled from a seeded deck, with an aging bonus; only the songs that enter the pool are read, so a
+10,000-song library costs about 320,000 pair costs. `q` is a song's energy quantile in the set (loudness, tempo and
+percussiveness); arcs are `flat`, `rising`, `wave` (period 10) and `peak` (warm-up, peak at 70 %, cool-down). The
+same seed gives the same order on every machine. For small sets (the CLI: ≤ 24 tracks) the pair cost can blend in
+the planner's best score.
+
+On the phone the first song of a shuffle starts at once in a random order; the controller then arranges the next 64
+slots off the main thread from analyses read by source (no file I/O) and swaps them in only if the queue is
+unchanged, and arranges the next 64 when playback gets within 16 songs of the end of the arranged part. Any queue
+edit by the user ends the arrangement.
+
 ---
 
 ## 6. DSP primitives (`dev.muisc.dsp`)

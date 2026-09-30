@@ -7,6 +7,7 @@ import com.github.ajalt.clikt.parameters.arguments.multiple
 import com.github.ajalt.clikt.parameters.options.convert
 import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.option
+import com.github.ajalt.clikt.parameters.types.choice
 import com.github.ajalt.clikt.parameters.types.file
 import com.github.ajalt.clikt.parameters.types.int
 import dev.muisc.metrics.Verdict
@@ -24,7 +25,8 @@ import kotlin.random.Random
  *     below the gates the planner uses.
  *  3. `--pairs N` ordered pairs are sampled from `--seed` ([LibraryEval.samplePairs]): half consecutive pairs of
  *     shuffled orders (planned with the previous pair's strategy, so the variety penalty applies as in a real
- *     shuffle), a quarter the hardest by tempo stretch, a quarter the hardest by key distance.
+ *     shuffle; with `--order smart` the orders come from the smart-shuffle sequencer instead), a quarter the
+ *     hardest by tempo stretch, a quarter the hardest by key distance.
  *  4. Each pair is planned with the same planner as `render` (profile, style and presets included) and the
  *     planner's pick is rendered and measured with the full metric set.
  *  5. `report.html` (self-contained), `results.csv` (one row per pair), `results.json` and `prefs.json` (the
@@ -43,6 +45,8 @@ class EvalCommand : MuiscCommand("eval") {
     private val failOn by option("--fail-on", metavar = "RATE", help = "Exit non-zero when the FAIL rate exceeds this (0.1 or 10%).")
         .convert { LibraryEval.parseRate(it) ?: fail("expected a rate between 0 and 1, or a percentage, got '$it'") }
     private val worstCount by option("--worst", metavar = "N", help = "Worst renders to list (default 10).").int().default(10)
+    private val orderMode by option("--order", help = "How the consecutive-pair half is drawn: shuffle = random orders (default), smart = smart-shuffle orders (see `muisc order`).")
+        .choice("shuffle", "smart").default("shuffle")
 
     override fun execute(ctx: CliContext) {
         if (pairCount < 1) throw CliktError("--pairs must be at least 1")
@@ -84,12 +88,17 @@ class EvalCommand : MuiscCommand("eval") {
         // 2. Sample the pairs.
         val features = HashMap<Pair<Int, Int>, dev.muisc.transitions.PairFeatures>()
         fun featuresOf(a: Int, b: Int) = features.getOrPut(a to b) { ctx.features(tracks[a], tracks[b]) }
-        val picks = LibraryEval.samplePairs(tracks.size, pairCount, Random(seed)) { a, b ->
+        val smart: ((Random) -> List<Int>)? = if (orderMode == "smart") { rnd -> SmartOrder.order(ctx, tracks, rnd.nextLong()) } else null
+        val hardness = { a: Int, b: Int ->
             val f = ctx.pairAnalyzer.features(tracks[a].analysis, tracks[b].analysis, ctx.prefs)
             LibraryEval.Hardness(f.stretchPercent, f.camelotDistance)
         }
+        val picks = LibraryEval.samplePairs(tracks.size, pairCount, Random(seed), hardness, smart)
         echo("")
-        echo("rendering ${picks.size} pair(s): " + LibraryEval.Source.values().joinToString(", ") { s -> "${picks.count { it.source == s }} ${s.label}" })
+        echo("rendering ${picks.size} pair(s): " + LibraryEval.Source.values().filter { s ->
+            when (s) { LibraryEval.Source.SHUFFLE -> smart == null; LibraryEval.Source.SMART -> smart != null; else -> true }
+        }
+            .joinToString(", ") { s -> "${picks.count { it.source == s }} ${s.label}" })
 
         // 3. Plan and render each pair.
         val prefsFile = File(out, "prefs.json").absoluteFile

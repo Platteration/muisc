@@ -60,6 +60,13 @@ interface EngineController {
 
     /** Replaces the queue. [context] decides whether transitions apply (ALBUM never transitions by default). */
     fun setQueue(songs: List<Song>, startIndex: Int, context: PlaybackContext, playNow: Boolean = true)
+
+    /**
+     * Plays [songs] as a SHUFFLE queue, starting at once with a random song. With the Smart shuffle setting on, the
+     * songs after it are then reordered off the main thread so that each one mixes well into the next
+     * ([SmartShuffle]); with it off the order stays plain random.
+     */
+    fun shuffle(songs: List<Song>)
     fun playNext(songs: List<Song>)
     fun addToQueue(songs: List<Song>)
     fun moveQueueItem(from: Int, to: Int)

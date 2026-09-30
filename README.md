@@ -52,6 +52,10 @@ The Android app is included automatically when an Android SDK is found (`sdk.dir
    ready (skip, queue edit) the player performs a live DJ move instead.
 5. **Album rule**: a queue built from an album in track order never gets transitions; shuffle and playlists do.
    Both behaviours are adjustable in Settings.
+6. **Smart shuffle**: shuffle orders the songs so each one mixes well into the next (tempo, key, energy, room to
+   mix, and not the same artist twice in a row), starting the first song at once and arranging the rest in the
+   background. On by default; Settings → Transitions → Smart shuffle turns it off for a plain random order. Albums
+   played in order and playlists played as written are never reordered.
 
 ## Strategies
 

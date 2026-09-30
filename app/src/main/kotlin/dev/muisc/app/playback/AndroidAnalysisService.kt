@@ -13,6 +13,7 @@ import dev.muisc.analysis.DefaultTrackAnalyzer
 import dev.muisc.analysis.Fingerprint
 import dev.muisc.analysis.TrackAnalyzer
 import dev.muisc.analysis.model.TrackAnalysis
+import dev.muisc.app.data.SourceAnalysisLookup
 import dev.muisc.app.data.db.Song
 import dev.muisc.audio.AudioSourceId
 import dev.muisc.audio.EngineStreamFactory
@@ -97,6 +98,17 @@ class AndroidAnalysisService(
     }
 
     fun cached(song: Song): TrackAnalysis? = cached(QueueManager.sourceOf(song))
+
+    /**
+     * The last analysis cached for [song]'s source at this engine rate, without touching the file (so without the
+     * fingerprint check [cached] does): what smart shuffle orders by. Null when the cache cannot look up by source.
+     * Blocking database read: never call from the main thread.
+     */
+    fun lastKnown(song: Song): TrackAnalysis? = try {
+        (cache as? SourceAnalysisLookup)?.latestForSource(QueueManager.sourceOf(song).value, sampleRate, TrackAnalysis.CURRENT_VERSION)
+    } catch (e: Exception) {
+        null
+    }
 
     override suspend fun analysis(track: AudioSourceId, urgent: Boolean): TrackAnalysis {
         cached(track)?.let { return it }

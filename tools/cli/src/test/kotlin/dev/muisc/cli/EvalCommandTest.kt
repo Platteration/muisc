@@ -182,6 +182,31 @@ class EvalCommandTest {
     }
 
     @Test
+    fun `with an order function the chains follow it and are labelled smart`() {
+        // A stand-in "smart" order: a fixed rotation of 0..9 chosen by the sampler's random stream.
+        val chains = ArrayList<List<Int>>()
+        val picks = LibraryEval.samplePairs(10, 20, Random(9), ::hardness) { r -> val k = r.nextInt(10); List(10) { (it * 3 + k) % 10 }.also { chains += it } }
+        val smart = picks.filter { it.source == LibraryEval.Source.SMART }
+        assertEquals(10, smart.size, "the consecutive half keeps its quota")
+        assertEquals(0, picks.count { it.source == LibraryEval.Source.SHUFFLE })
+        val consecutive = chains.flatMap { c -> (0 until c.size - 1).map { c[it] to c[it + 1] } }.toSet()
+        assertTrue(smart.all { (it.a to it.b) in consecutive }, "every smart pick is consecutive in an order the function returned")
+        assertEquals(5, picks.count { it.source == LibraryEval.Source.STRETCH })
+        assertEquals(5, picks.count { it.source == LibraryEval.Source.KEY })
+    }
+
+    @Test
+    fun `eval --order smart draws the consecutive pairs from smart-shuffle orders`() {
+        val dir = File(root, "eval-smart")
+        val text = run("eval", library.absolutePath, "--pairs", "4", "--seed", "3", "--order", "smart", "--out", dir.absolutePath)
+        assertContains(text, "consecutive in a smart-shuffle order")
+        assertFalse(text.contains("consecutive in a shuffled order"), "the unused chain source is not listed")
+        val sources = json(dir)["rows"]!!.jsonArray.map { it.jsonObject["source"]!!.jsonPrimitive.content }
+        assertEquals(mapOf("smart" to 2, "stretch" to 1, "key" to 1), sources.groupingBy { it }.eachCount())
+        assertFalse(firstOutput.contains("smart-shuffle"), "the default eval does not mention smart orders")
+    }
+
+    @Test
     fun `rates parse as fractions or percentages`() {
         assertEquals(0.1, LibraryEval.parseRate("0.1"))
         assertEquals(0.1, LibraryEval.parseRate("10%"))

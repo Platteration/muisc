@@ -14,6 +14,7 @@ fun allCommands(): List<CliktCommand> = listOf(
     PlanCommand(),       // plan    — rank every strategy for a pair and explain the scores
     RenderCommand(),     // render  — one transition to WAV + plan + report (+ context render)
     MixCommand(),        // mix     — a whole mini DJ set through the real player
+    OrderCommand(),      // order   — smart shuffle: order tracks so every neighbouring pair mixes well
     AbCommand(),         // ab      — every strategy on one pair, with an HTML comparison page
     SweepCommand(),      // sweep   — a parameter grid with CSV and an SVG plot
     ScoreCommand(),      // score   — pairwise best-strategy/score matrix

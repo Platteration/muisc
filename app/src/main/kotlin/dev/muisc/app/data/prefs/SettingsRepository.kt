@@ -45,6 +45,11 @@ data class UiPrefs(
      * technique in that kind of pair ([dev.muisc.player.TransitionCoordinator], [dev.muisc.app.playback.SkipFeedback]).
      */
     val learnFromSkips: Boolean = true,
+    /**
+     * Shuffle orders the songs so each one mixes well into the next (`SmartShuffle`); off = a plain random order.
+     * On by default: making every song flow into the next is what the player is for.
+     */
+    val smartShuffle: Boolean = true,
 )
 
 /** Bookkeeping for incremental MediaStore scans (not user-facing). */
@@ -98,6 +103,7 @@ class SettingsRepository(context: Context) {
             p[Keys.ANALYSE_ONLY_WHILE_CHARGING] = next.analyseOnlyWhileCharging
             p[Keys.KEEP_ALBUM_FLOW_IN_PLAYLISTS] = next.keepAlbumFlowInPlaylists
             p[Keys.LEARN_FROM_SKIPS] = next.learnFromSkips
+            p[Keys.SMART_SHUFFLE] = next.smartShuffle
         }
     }
 
@@ -135,6 +141,7 @@ class SettingsRepository(context: Context) {
             analyseOnlyWhileCharging = this[Keys.ANALYSE_ONLY_WHILE_CHARGING] ?: d.analyseOnlyWhileCharging,
             keepAlbumFlowInPlaylists = this[Keys.KEEP_ALBUM_FLOW_IN_PLAYLISTS] ?: d.keepAlbumFlowInPlaylists,
             learnFromSkips = this[Keys.LEARN_FROM_SKIPS] ?: d.learnFromSkips,
+            smartShuffle = this[Keys.SMART_SHUFFLE] ?: d.smartShuffle,
         )
     }
 
@@ -165,6 +172,7 @@ class SettingsRepository(context: Context) {
         val ANALYSE_ONLY_WHILE_CHARGING = booleanPreferencesKey("analysis.onlyWhileCharging")
         val KEEP_ALBUM_FLOW_IN_PLAYLISTS = booleanPreferencesKey("transitions.keepAlbumFlowInPlaylists")
         val LEARN_FROM_SKIPS = booleanPreferencesKey("dj.learnFromSkips")
+        val SMART_SHUFFLE = booleanPreferencesKey("playback.smartShuffle")
         val TRANSITION_PREFS_JSON = stringPreferencesKey("transitions.prefsJson")
         val SCAN_GENERATION = longPreferencesKey("scan.generation")
         val SCAN_DATE_MODIFIED = longPreferencesKey("scan.dateModifiedSec")

@@ -141,6 +141,8 @@
     <string name="settings_keep_album_flow">Keep album flow for consecutive album tracks</string>
     <string name="settings_learn_from_skips">Learn from skips</string>
     <string name="settings_learn_from_skips_body">Skipping during a transition, or in the first 20 seconds after it, counts as a small thumbs-down for that technique in similar pairs. Albums never count.</string>
+    <string name="settings_smart_shuffle">Smart shuffle</string>
+    <string name="settings_smart_shuffle_body">Shuffle orders songs so each one mixes well into the next (tempo, key, energy). Off: plain random order.</string>
     <string name="settings_max_stretch">Max tempo stretch (%)</string>
     <string name="settings_max_pitch">Max pitch shift (semitones)</string>
     <string name="settings_key_lock">Key lock (preserve pitch when stretching)</string>

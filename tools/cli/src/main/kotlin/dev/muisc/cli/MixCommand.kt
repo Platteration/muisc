@@ -35,6 +35,9 @@ import kotlinx.serialization.json.putJsonArray
  * the best-ranked candidate that leaves both songs their minimum body ([DefaultProgramBuilder.roomOrder]), so a
  * short song keeps its transitions; a pair where none does is played body to body and reported as dropped.
  *
+ * With `--order smart` the files are first reordered by the engine's smart shuffle ([SmartOrder.order], the same
+ * sequencer as `muisc order`, seeded by `--seed`); it is refused for `--context album`, which always plays in order.
+ *
  * The result is one WAV of the whole mini set and — with `--report` — a JSON listing every transition (strategy,
  * score, reasons, metrics) and the seam time in the output where you can hear it.
  */
@@ -49,11 +52,17 @@ class MixCommand : MuiscCommand("mix") {
         .default(PlaybackContext.PLAYLIST)
     private val report by option("--report", metavar = "SET.JSON", help = "Write a JSON report of every transition and seam.").file()
     private val noLimiter by option("--no-limiter", help = "Disable the player's true-peak limiter.").flag()
+    private val orderMode by option("--order", help = "given = play the files as listed (default); smart = reorder them so every pair mixes well (see `muisc order`).")
+        .choice("given", "smart").default("given")
 
     override fun execute(ctx: CliContext) {
         if (files.size < 2) throw CliktError("mix needs at least two files (got ${files.size})")
-        val tracks = files.map { ctx.trackRef(it) }
-        echo("queue (${tracks.size} tracks, context $playbackContext):")
+        if (orderMode == "smart" && playbackContext == PlaybackContext.ALBUM) {
+            throw CliktError("--order smart reorders the tracks, but an album is played in its own order (use --context shuffle or playlist)")
+        }
+        val given = files.map { ctx.trackRef(it) }
+        val tracks = if (orderMode == "smart") SmartOrder.order(ctx, given, seed).map { given[it] } else given
+        echo("queue (${tracks.size} tracks, context $playbackContext" + (if (orderMode == "smart") ", smart order" else "") + "):")
         echo(Fmt.table(listOf(listOf("#", "track", "bpm", "key", "lufs", "length")) + tracks.mapIndexed { i, t ->
             listOf("${i + 1}", t.title, Fmt.num(t.analysis.tempo.bpm, 1), Fmt.key(t.analysis), Fmt.num(t.analysis.loudness.integratedLufs.toDouble(), 1), Fmt.sec(t.analysis.durationSec))
         }, "  "))
@@ -175,6 +184,7 @@ class MixCommand : MuiscCommand("mix") {
     ): JsonObject = buildJsonObject {
         put("out", out.absolutePath)
         put("context", playbackContext.name)
+        put("order", orderMode)
         put("seed", seed)
         put("sampleRate", ctx.sampleRate)
         put("durationSec", durationSec)

@@ -15,6 +15,7 @@ object LibraryEval {
     /** Why a pair was chosen. */
     enum class Source(val label: String) {
         SHUFFLE("consecutive in a shuffled order"),
+        SMART("consecutive in a smart-shuffle order"),
         STRETCH("hardest by tempo stretch"),
         KEY("hardest by key distance"),
     }
@@ -35,8 +36,11 @@ object LibraryEval {
      * scored with [hardness] over all ordered pairs, or [HARDNESS_POOL] random ones in a large library. When a quota
      * cannot be met without repeating a pair, the remainder is filled from the other lists. Never more than
      * `trackCount × (trackCount − 1)` pairs.
+     *
+     * With [order] the chains come from `order(rnd)` instead of `shuffled(rnd)` (`eval --order smart` passes the
+     * smart-shuffle sequencer seeded from [rnd]) and are labelled [Source.SMART]; everything else is unchanged.
      */
-    fun samplePairs(trackCount: Int, count: Int, rnd: Random, hardness: (Int, Int) -> Hardness): List<Pick> {
+    fun samplePairs(trackCount: Int, count: Int, rnd: Random, hardness: (Int, Int) -> Hardness, order: ((Random) -> List<Int>)? = null): List<Pick> {
         if (trackCount < 2 || count <= 0) return emptyList()
         val total = trackCount.toLong() * (trackCount - 1)
         val wanted = minOf(count.toLong(), total).toInt()
@@ -57,12 +61,12 @@ object LibraryEval {
         var rounds = 0
         val seen = HashSet<Pair<Int, Int>>()
         while (shuffleCandidates.size < wanted && rounds < 50) {
-            val order = (0 until trackCount).shuffled(rnd)
+            val chain = order?.invoke(rnd) ?: (0 until trackCount).shuffled(rnd)
             var prev: Int? = null
-            for (i in 0 until order.size - 1) {
-                val pair = order[i] to order[i + 1]
+            for (i in 0 until chain.size - 1) {
+                val pair = chain[i] to chain[i + 1]
                 if (seen.add(pair)) {
-                    shuffleCandidates += Pick(pair.first, pair.second, Source.SHUFFLE, prev)
+                    shuffleCandidates += Pick(pair.first, pair.second, if (order != null) Source.SMART else Source.SHUFFLE, prev)
                     prev = shuffleCandidates.size - 1
                 } else {
                     prev = null

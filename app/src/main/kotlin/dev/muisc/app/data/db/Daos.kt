@@ -272,6 +272,13 @@ interface AnalysisDao {
 
     @Query("SELECT fingerprint FROM track_analysis WHERE sourceId = :sourceId AND version = :version LIMIT 1")
     suspend fun fingerprintForSource(sourceId: String, version: Int): String?
+
+    /**
+     * The newest cached analysis JSON made from [sourceId] at this rate and version, found WITHOUT reading the file
+     * (no fingerprint): smart shuffle's lookup. It can be stale if the file changed since it was analysed.
+     */
+    @Query("SELECT json FROM track_analysis WHERE sourceId = :sourceId AND sampleRate = :sampleRate AND version = :version ORDER BY updatedAt DESC LIMIT 1")
+    fun latestJsonForSourceBlocking(sourceId: String, sampleRate: Int, version: Int): String?
 }
 
 /** Transition log, per-pair pins and strategy presets. */

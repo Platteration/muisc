@@ -84,6 +84,25 @@ previous one has handed the song over), `mix` plays the best-ranked candidate th
 line. A transition that still has to be dropped, because no candidate fits, is reported with `dropped` and that
 pair plays body to body.
 
+```
+muisc order playlist/ --seed 3                      # smart shuffle: the order, each pair's cost, total vs random
+muisc order playlist/*.flac --arc peak --variety 0  # warm-up → peak → cool-down, best order found
+muisc order playlist/ --json                        # the same as JSON (nothing else printed)
+muisc mix playlist/*.flac --order smart --context shuffle -o set.wav   # render the smart order
+```
+
+`order` runs the engine's set sequencer (`dev.muisc.transitions.sequence.SetSequencer`, the one behind the app's
+smart shuffle) over the files: a pair cost from the pair features (tempo stretch, key distance, energy and
+loudness jump, grid confidence, outro/intro fit, room, vocal clash, and a penalty when no beat-matched move is
+possible), a greedy start and 2-opt / or-opt local search up to 500 tracks, a windowed online pass above. It prints
+the order with the cost of each neighbouring pair, the total, and the median total of 200 seeded random orders of
+the same files. Up to 24 tracks the pair costs also blend in the planner's best score. `--arc` is `flat`
+(default), `rising`, `wave` or `peak`; `--variety` (0..1, default 0.3) adds seeded noise to the costs so each seed
+gives a different order. A file that cannot be analysed is placed without cost information (its pairs cost 0.5)
+and listed as "not analysed". The CLI reads no tags, so the same-artist rule does not apply here. `mix --order
+smart` plays the order `order` prints for the same seed; it is refused for `--context album`. `eval --order smart`
+draws its consecutive half from smart orders instead of random shuffles (labelled `smart` in the report).
+
 ## Comparing and tuning
 
 ```

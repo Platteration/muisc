@@ -257,6 +257,13 @@ private fun TransitionsSection(prefs: TransitionPrefs, uiPrefs: UiPrefs?, vm: Se
                 enabled = prefs.enabled,
             )
         }
+        SwitchRow(
+            title = stringResource(R.string.settings_smart_shuffle),
+            subtitle = stringResource(R.string.settings_smart_shuffle_body),
+            checked = uiPrefs?.smartShuffle ?: UiPrefs().smartShuffle,
+            onChecked = { on -> if (uiPrefs != null) vm.updateUi { it.copy(smartShuffle = on) } },
+            enabled = uiPrefs != null,
+        )
         SliderRow(
             title = stringResource(R.string.settings_max_stretch),
             value = prefs.maxStretchPercent.toFloat(),

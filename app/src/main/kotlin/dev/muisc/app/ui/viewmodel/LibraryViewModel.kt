@@ -110,10 +110,13 @@ class LibraryViewModel(private val repo: LibraryRepository) : ViewModel() {
         controller.setQueue(songs, index.coerceIn(0, songs.lastIndex), context)
     }
 
-    /** Shuffles [songs] and plays them as a SHUFFLE queue (transitions enabled). */
+    /**
+     * Shuffles [songs] and plays them as a SHUFFLE queue (transitions enabled): a random first song at once, the rest
+     * smart-ordered by the controller when the Smart shuffle setting is on ([EngineController.shuffle]).
+     */
     fun shuffle(songs: List<Song>) {
         if (songs.isEmpty()) return
-        controller.setQueue(songs.shuffled(), 0, PlaybackContext.SHUFFLE)
+        controller.shuffle(songs)
     }
 
     fun shuffleAll() = shuffle(songs.value)

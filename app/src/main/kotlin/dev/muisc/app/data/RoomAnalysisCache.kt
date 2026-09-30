@@ -18,7 +18,7 @@ class RoomAnalysisCache(
     private val dao: AnalysisDao,
     private val songDao: SongDao? = null,
     private val memoryEntries: Int = 64,
-) : AnalysisCache {
+) : AnalysisCache, SourceAnalysisLookup {
 
     private val memory = object : LinkedHashMap<String, TrackAnalysis>(32, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, TrackAnalysis>?): Boolean = size > memoryEntries
@@ -64,8 +64,29 @@ class RoomAnalysisCache(
         }
     }
 
+    override fun latestForSource(sourceId: String, sampleRate: Int, version: Int): TrackAnalysis? {
+        val json = try {
+            dao.latestJsonForSourceBlocking(sourceId, sampleRate, version)
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        return try {
+            TrackAnalysis.fromJson(json)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     override fun clear() {
         synchronized(memory) { memory.clear() }
         dao.clearBlocking()
     }
+}
+
+/**
+ * The last analysis cached for a source, looked up by the source id alone (no file I/O, so no fingerprint check):
+ * good enough to ORDER songs (smart shuffle), never used to plan or render a transition.
+ */
+interface SourceAnalysisLookup {
+    fun latestForSource(sourceId: String, sampleRate: Int, version: Int): TrackAnalysis?
 }

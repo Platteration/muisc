@@ -227,6 +227,30 @@ class QueueManager {
         return snapshot()
     }
 
+    /**
+     * Replaces the play order after [position] with [songs] (smart shuffle), but only when nothing changed since the
+     * caller read it: the song at [position] is still [anchorId], [position] is at or after the current song, the
+     * songs after it are still exactly [expected] (same ids, same order), and [songs] is a permutation of them.
+     * Returns false and leaves the queue untouched otherwise. When the natural order mirrors the play order (shuffle
+     * off, as for a queue that was shuffled when it was built) it follows; with shuffle on only the play order
+     * changes, so switching shuffle off still restores the user's order.
+     */
+    @Synchronized
+    fun replaceAfter(position: Int, anchorId: Long, expected: List<Song>, songs: List<Song>): Boolean {
+        if (position !in order.indices || position < index || order[position].id != anchorId) return false
+        val tail = order.subList(position + 1, order.size)
+        if (tail.map { it.id } != expected.map { it.id }) return false
+        if (songs.map { it.id }.sorted() != expected.map { it.id }.sorted()) return false
+        val mirrored = !shuffle && natural.map { it.id } == order.map { it.id }
+        tail.clear()
+        order.addAll(songs)
+        if (mirrored) {
+            natural.clear()
+            natural.addAll(order)
+        }
+        return true
+    }
+
     /** The natural (un-shuffled) order, for persistence. */
     @Synchronized
     fun naturalOrder(): List<Song> = ArrayList(natural)

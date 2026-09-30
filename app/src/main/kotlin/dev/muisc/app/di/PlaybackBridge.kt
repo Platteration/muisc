@@ -99,6 +99,7 @@ class DelegatingEngineController(
     override fun seekTo(positionMs: Long) = dispatch { it.seekTo(positionMs) }
     override fun setQueue(songs: List<Song>, startIndex: Int, context: PlaybackContext, playNow: Boolean) =
         dispatch { it.setQueue(songs, startIndex, context, playNow) }
+    override fun shuffle(songs: List<Song>) = dispatch { it.shuffle(songs) }
     override fun playNext(songs: List<Song>) = dispatch { it.playNext(songs) }
     override fun addToQueue(songs: List<Song>) = dispatch { it.addToQueue(songs) }
     override fun moveQueueItem(from: Int, to: Int) = dispatch { it.moveQueueItem(from, to) }
