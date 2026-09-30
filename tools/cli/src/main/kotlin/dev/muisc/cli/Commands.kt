@@ -27,4 +27,5 @@ fun allCommands(): List<CliktCommand> = listOf(
     StyleCommand(),         // style   — listening styles that reshape the preferences (--style)
     PinCommand(),           // pin     — always use a chosen transition for a pair of tracks
     RateCommand(),          // rate    — thumbs up/down that the planner learns from
+    LabCommand(),           // lab     — local web page to audition, tweak, sweep and blind-test transitions
 )

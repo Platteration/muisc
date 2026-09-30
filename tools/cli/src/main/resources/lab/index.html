@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<title>Muisc Transition Lab</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#player-panel">Skip to the player</a>
+<header class="top">
+  <h1>Transition Lab</h1>
+  <div class="top-controls">
+    <label class="inline">Style
+      <select id="style" aria-describedby="style-help"></select>
+    </label>
+    <span id="style-help" class="muted small"></span>
+  </div>
+  <p id="status" class="status" role="status" aria-live="polite"></p>
+</header>
+
+<main class="layout">
+  <div class="work">
+    <section class="panel" aria-labelledby="pair-h">
+      <h2 id="pair-h">Pair</h2>
+      <div class="pair-pick">
+        <label>A — outgoing
+          <select id="track-a"></select>
+        </label>
+        <button id="swap" type="button" class="icon" title="Swap A and B" aria-label="Swap A and B">⇄</button>
+        <label>B — incoming
+          <select id="track-b"></select>
+        </label>
+      </div>
+      <details id="add-tracks">
+        <summary>Add tracks from this computer</summary>
+        <form id="add-form" class="row">
+          <label class="grow">File or folder path
+            <input id="add-path" type="text" autocomplete="off" spellcheck="false" placeholder="/home/me/Music/album">
+          </label>
+          <button type="submit">Add</button>
+        </form>
+      </details>
+      <div id="pair-summary" class="pair-summary" aria-live="polite"></div>
+    </section>
+
+    <div class="tabs" role="tablist" aria-label="Lab tools">
+      <button role="tab" id="tabbtn-design" aria-controls="tab-design" aria-selected="true">Design</button>
+      <button role="tab" id="tabbtn-recipe" aria-controls="tab-recipe" aria-selected="false" tabindex="-1">Recipe editor</button>
+      <button role="tab" id="tabbtn-blind" aria-controls="tab-blind" aria-selected="false" tabindex="-1">Blind test</button>
+      <button role="tab" id="tabbtn-sweep" aria-controls="tab-sweep" aria-selected="false" tabindex="-1">Sweep</button>
+      <button role="tab" id="tabbtn-library" aria-controls="tab-library" aria-selected="false" tabindex="-1">Library</button>
+    </div>
+
+    <section id="tab-design" class="panel tabpanel" role="tabpanel" aria-labelledby="tabbtn-design">
+      <div class="design-grid">
+        <div>
+          <h2>Strategies <span class="muted small">ranked by the planner</span></h2>
+          <ol id="candidates" class="candidates"></ol>
+          <details id="skipped-box">
+            <summary>Not ranked for this pair (<span id="skipped-count">0</span>)</summary>
+            <ul id="skipped" class="skipped"></ul>
+          </details>
+        </div>
+        <div>
+          <h2 id="strategy-title">Parameters</h2>
+          <p id="strategy-desc" class="muted"></p>
+          <div class="row">
+            <label class="inline">Preset
+              <select id="preset"></select>
+            </label>
+            <button id="preset-delete" type="button" class="quiet">Delete preset</button>
+          </div>
+          <form id="params" class="params" novalidate></form>
+          <fieldset id="modifiers" class="modifiers">
+            <legend>Modifiers</legend>
+            <label class="inline"><input type="radio" name="mod-mode" value="auto" checked> Planner's choice <span id="mod-auto" class="muted small"></span></label>
+            <label class="inline"><input type="radio" name="mod-mode" value="manual"> Choose:</label>
+            <span id="mod-list" class="mod-list"></span>
+          </fieldset>
+          <div class="row">
+            <label class="inline">Context
+              <input id="context-sec" type="number" min="0" max="60" step="1" value="8" class="num"> s
+            </label>
+            <button id="render" type="button" class="primary">Render</button>
+            <button id="reset-params" type="button" class="quiet">Defaults</button>
+          </div>
+          <div class="row">
+            <form id="preset-form" class="row inline-form">
+              <label class="inline">Save values as preset
+                <input id="preset-id" type="text" placeholder="my-preset" pattern="[a-z0-9][a-z0-9-]*" spellcheck="false" class="short">
+              </label>
+              <button type="submit">Save preset</button>
+            </form>
+          </div>
+          <div class="row">
+            <button id="pin" type="button">Pin to this pair</button>
+            <button id="unpin" type="button" class="quiet">Clear pin</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-recipe" class="panel tabpanel" role="tabpanel" aria-labelledby="tabbtn-recipe" hidden>
+      <div class="row">
+        <label class="inline">Start from
+          <select id="recipe-source"></select>
+        </label>
+        <button id="recipe-load" type="button">Load</button>
+        <span class="muted small" id="recipe-dir"></span>
+      </div>
+      <label for="recipe-text" class="block">Recipe JSON <span class="muted small" id="recipe-cursor">line 1, column 1</span></label>
+      <textarea id="recipe-text" class="code" rows="22" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+      <div class="row">
+        <button id="recipe-validate" type="button">Validate</button>
+        <button id="recipe-render" type="button" class="primary">Render without saving</button>
+        <button id="recipe-save" type="button">Save to my recipes</button>
+        <span id="recipe-summary" class="small" role="status"></span>
+      </div>
+      <ul id="recipe-problems" class="problems"></ul>
+      <h3>Knobs</h3>
+      <form id="recipe-vars" class="params" novalidate></form>
+      <h3>Lanes <span class="muted small">at the knob values above; the marker is the end of the overlap</span></h3>
+      <canvas id="lane-plot" class="lane-plot" height="200" role="img" aria-label="Recipe lane preview"></canvas>
+    </section>
+
+    <section id="tab-blind" class="panel tabpanel" role="tabpanel" aria-labelledby="tabbtn-blind" hidden>
+      <p>Pick 2–4 candidates for this pair. They are rendered and shuffled under neutral names (X, Y, Z, W) so you judge only what you hear. Your pick is rated up and the others down; the planner learns from it.</p>
+      <div id="blind-candidates" class="blind-candidates"></div>
+      <div class="row">
+        <button id="blind-add" type="button" class="quiet">Add a candidate</button>
+        <button id="blind-start" type="button" class="primary">Start blind test</button>
+      </div>
+      <form id="blind-vote" class="blind-vote" hidden>
+        <fieldset>
+          <legend>Which one did you like best?</legend>
+          <span id="blind-options" class="row"></span>
+        </fieldset>
+        <button type="submit" class="primary">Vote and reveal</button>
+      </form>
+      <div id="blind-reveal"></div>
+    </section>
+
+    <section id="tab-sweep" class="panel tabpanel" role="tabpanel" aria-labelledby="tabbtn-sweep" hidden>
+      <p>Render the selected strategy at several values of one parameter and plot a metric against it. Click a point to listen.</p>
+      <div class="row">
+        <label class="inline">Parameter <select id="sweep-param"></select></label>
+        <label class="inline">From <input id="sweep-from" type="number" class="num" step="any"></label>
+        <label class="inline">To <input id="sweep-to" type="number" class="num" step="any"></label>
+        <label class="inline">Steps <input id="sweep-steps" type="number" class="num" min="2" max="12" value="5"></label>
+        <button id="sweep-run" type="button" class="primary">Run sweep</button>
+      </div>
+      <div class="row">
+        <label class="inline">Metric <select id="sweep-metric"></select></label>
+      </div>
+      <div id="sweep-plot" class="sweep-plot"></div>
+    </section>
+
+    <section id="tab-library" class="panel tabpanel" role="tabpanel" aria-labelledby="tabbtn-library" hidden>
+      <h2>Presets</h2>
+      <div class="table-wrap"><table id="presets-table"></table></div>
+      <h2>Pins</h2>
+      <div class="table-wrap"><table id="pins-table"></table></div>
+      <h2>What the planner learned from your ratings</h2>
+      <p class="muted small" id="ratings-formula"></p>
+      <div class="table-wrap"><table id="ratings-table"></table></div>
+    </section>
+  </div>
+
+  <aside id="player-panel" class="panel player" aria-labelledby="player-h">
+    <h2 id="player-h">Listen</h2>
+    <div id="job" class="job" hidden>
+      <progress id="job-progress" max="1" value="0"></progress>
+      <span id="job-msg" class="small"></span>
+    </div>
+    <div id="slots" class="slots" role="group" aria-label="Render slots (keys 1–9)"></div>
+    <p id="slot-empty" class="muted">Render something to hear it here. Each render keeps its own slot; switching slots keeps the playback position.</p>
+    <div class="wave-wrap">
+      <canvas id="wave" class="wave" height="220" tabindex="0" role="slider" aria-label="Playback position (click or use the arrow keys to seek)" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"></canvas>
+    </div>
+    <div id="lane-legend" class="legend"></div>
+    <audio id="audio" controls preload="auto"></audio>
+    <div class="row">
+      <span class="small">Rate this transition:</span>
+      <button id="rate-up" type="button" class="quiet">Good</button>
+      <button id="rate-down" type="button" class="quiet">Bad</button>
+      <a id="download-ctx" class="small" download>Download context WAV</a>
+      <a id="download-seg" class="small" download>segment WAV</a>
+    </div>
+    <p class="muted small">Keys: Space play/pause · ←/→ seek 2 s (on the waveform) · 1–9 switch slot</p>
+    <div id="render-info" class="render-info"></div>
+    <div class="table-wrap"><table id="metrics" class="metrics"></table></div>
+    <ul id="warnings" class="warnings"></ul>
+  </aside>
+</main>
+</body>
+</html>
