@@ -2,18 +2,25 @@ package dev.muisc.app.di
 
 import dev.muisc.analysis.model.TrackAnalysis
 import dev.muisc.app.data.db.Song
+import dev.muisc.app.playback.CustomizationApi
+import dev.muisc.app.playback.DjResult
+import dev.muisc.app.playback.DjState
 import dev.muisc.app.playback.EngineController
+import dev.muisc.app.playback.ImportOutcome
 import dev.muisc.app.playback.LabProgress
+import dev.muisc.app.playback.NoOpCustomization
 import dev.muisc.app.playback.NoOpEngineController
 import dev.muisc.app.playback.NoOpTransitionLab
 import dev.muisc.app.playback.PlayerState
 import dev.muisc.app.playback.RepeatMode
 import dev.muisc.app.playback.TransitionLabApi
+import dev.muisc.app.playback.UpcomingChoice
 import dev.muisc.transitions.Params
 import dev.muisc.transitions.PlaybackContext
 import dev.muisc.transitions.RankedPlans
 import dev.muisc.transitions.RenderedTransition
 import dev.muisc.transitions.TransitionPrefs
+import dev.muisc.transitions.custom.Rating
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -24,6 +31,7 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -153,4 +161,55 @@ class DelegatingTransitionLab(
 
     override suspend fun pinForPair(a: Song, b: Song, strategyId: String?, params: Params?) =
         lab().pinForPair(a, b, strategyId, params)
+}
+
+/**
+ * The one [CustomizationApi] the UI holds, installed like the Lab: [state] follows the installed implementation
+ * ([NoOpCustomization]'s "connecting" state until then, and asking for the service to start as soon as a screen
+ * subscribes); suspending calls wait up to [connectTimeoutMs] for the service before falling through to
+ * [NoOpCustomization], whose results carry a "not connected" message the screens show.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+class DelegatingCustomization(
+    scope: CoroutineScope,
+    private val requestService: () -> Unit,
+    private val connectTimeoutMs: Long = 10_000L,
+) : CustomizationApi {
+
+    private val real = MutableStateFlow<CustomizationApi?>(null)
+
+    fun install(api: CustomizationApi) { real.value = api }
+
+    fun uninstall(api: CustomizationApi? = null) {
+        if (api == null || real.value === api) real.value = null
+    }
+
+    override val state: StateFlow<DjState> = real
+        .flatMapLatest { (it ?: NoOpCustomization).state }
+        .onStart { if (real.value == null) requestService() }
+        .stateIn(scope, SharingStarted.WhileSubscribed(5_000), DjState(loading = true))
+
+    private suspend fun api(): CustomizationApi {
+        real.value?.let { return it }
+        requestService()
+        return withTimeoutOrNull(connectTimeoutMs) { real.filterNotNull().first() } ?: NoOpCustomization
+    }
+
+    override suspend fun refresh() = api().refresh()
+    override suspend fun chooseStyle(id: String?): DjResult = api().chooseStyle(id)
+    override suspend fun importRecipe(uri: String, allowErrors: Boolean, replace: Boolean): ImportOutcome =
+        api().importRecipe(uri, allowErrors, replace)
+    override suspend fun exportRecipe(id: String, uri: String): DjResult = api().exportRecipe(id, uri)
+    override suspend fun recipeText(id: String): String? = api().recipeText(id)
+    override suspend fun duplicateRecipe(id: String): DjResult = api().duplicateRecipe(id)
+    override suspend fun deleteRecipe(id: String): DjResult = api().deleteRecipe(id)
+    override suspend fun setRecipeEnabled(id: String, enabled: Boolean): DjResult = api().setRecipeEnabled(id, enabled)
+    override suspend fun savePreset(name: String, strategyId: String, params: Params): DjResult = api().savePreset(name, strategyId, params)
+    override suspend fun deletePreset(id: String): DjResult = api().deletePreset(id)
+    override suspend fun setActivePreset(strategyId: String, presetId: String?): DjResult = api().setActivePreset(strategyId, presetId)
+    override suspend fun removePin(aIdentity: String, bIdentity: String): DjResult = api().removePin(aIdentity, bIdentity)
+    override suspend fun rate(a: Song, b: Song, strategyId: String, rating: Rating): DjResult = api().rate(a, b, strategyId, rating)
+    override suspend fun resetLearned(strategyId: String?): DjResult = api().resetLearned(strategyId)
+    override suspend fun upcoming(): UpcomingChoice? = api().upcoming()
+    override suspend fun overrideNext(strategyId: String?): DjResult = api().overrideNext(strategyId)
 }

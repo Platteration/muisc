@@ -9,7 +9,8 @@ does and does not cover.
 
 This file is the single checklist for the first real build. §1 says what is already known-good, §2
 lists what the type-check fixed, §3 is what still has to be checked on an SDK, §4 is the set of real
-gaps found by reading the code that no compiler will tell you about.
+gaps found by reading the code that no compiler will tell you about. §6 describes the DJ customization
+(recipes, presets, styles, pins, ratings, the next-transition override) and §7 is its on-device checklist.
 
 ---
 
@@ -24,32 +25,46 @@ gaps found by reading the code that no compiler will tell you about.
 To re-run the offline type-check (no SDK needed):
 
 ```
-./gradlew :engine:player:compileKotlin   # once, to build the engine classes + populate the cache
+./gradlew :engine:audio:classes :engine:dsp:classes :engine:analysis:classes \
+          :engine:transitions:classes :engine:metrics:classes :engine:player:classes
+                                         # once: engine classes + resources (the built-in recipes)
 app/typecheck.sh                         # non-UI packages + unit tests  -> must be clean
 app/typecheck.sh ui                      # everything                    -> currently clean too
+app/typecheck.sh test                    # core, then runs app/src/test  -> must pass
 ```
+
+`classes` (not just `compileKotlin`) matters since the recipes: it also runs `processResources`, and `test`
+puts `engine/*/build/resources/main` on the run-time classpath so the built-in recipes load through the class
+loader the way they do in the APK.
 
 ---
 
 ## 1. What the type-check proves today
 
-Both modes are **clean — zero errors, zero warnings** over all 79 Kotlin files in
-`app/src/main/kotlin` and `app/src/test/kotlin`.
+Both modes are **clean — zero errors** over all 90 Kotlin files in `app/src/main/kotlin` and
+`app/src/test/kotlin` (the harness runs the compiler with `-nowarn`, so warnings are not reported).
 
 * Every use of the engine API is type-correct against the **real compiled engine classes**
   (`dev.muisc.player`, `dev.muisc.transitions`, `dev.muisc.analysis`, `dev.muisc.audio`,
   `dev.muisc.metrics`, `dev.muisc.dsp`): names, arities, argument/return types, nullability,
   `suspend`-ness, every `override`, every abstract member.
 * The four packages agree with each other. `PlaybackService` ↔ `EngineGraph` ↔ `EngineControllerImpl`
-  ↔ `QueueManager` ↔ `AndroidAnalysisService` ↔ `TransitionLabImpl`, and `ui/**` ↔ `di/AppGraph` ↔
-  `data/**`, all resolve. The two frozen contracts (`playback/EngineController.kt`,
-  `playback/TransitionLabApi.kt`) are implemented in full by `EngineControllerImpl`,
-  `NoOpEngineController`, `DelegatingEngineController`, `TransitionLabImpl`, `NoOpTransitionLab` and
-  `DelegatingTransitionLab`.
+  ↔ `QueueManager` ↔ `AndroidAnalysisService` ↔ `TransitionLabImpl` ↔ `CustomizationImpl` ↔
+  `DjCustomization`, and `ui/**` ↔ `di/AppGraph` ↔ `data/**`, all resolve. The two frozen contracts
+  (`playback/EngineController.kt`, `playback/TransitionLabApi.kt`) are implemented in full by
+  `EngineControllerImpl`, `NoOpEngineController`, `DelegatingEngineController`, `TransitionLabImpl`,
+  `NoOpTransitionLab` and `DelegatingTransitionLab`; the new `playback/CustomizationApi.kt` by
+  `CustomizationImpl`, `NoOpCustomization` and `DelegatingCustomization`.
+* The DJ customization is type-correct against the real engine `recipe` and `custom` packages
+  (`RecipeLibrary`, `RecipeCatalog`, `RecipeCodec`, `RecipeValidator`, `RecipeResolver`, `UserProfile`,
+  `PlannerCustomization`, `PresetResolution`, `StyleProfile`, `PairPin`, `FeedbackLearner`, the planner's
+  `planExplained`).
 * Every `R.string` / `R.drawable` / `R.plurals` / `R.color` / `R.style` reference resolves against a
   name that really exists in `app/src/main/res` (the harness generates `R` from the resource files).
-* The app's own unit tests compile **and pass**: 18 tests in `FolderTreeTest` and
-  `GaplessTagParserTest`, run on the JUnit 5 platform against the same classes.
+* The app's own unit tests compile **and pass** (`app/typecheck.sh test`): 39 tests — `FolderTreeTest`,
+  `GaplessTagParserTest`, and for the DJ customization `DjCustomizationTest` (17), `QueueReplanIdsTest` (3)
+  and `ReplanNextEdgeTest` (1, the real `TransitionCoordinator`) — run on the JUnit 5 platform against the
+  same classes and the engine's real resources.
 * Kotlin opt-in propagation is real for the Compose markers, which is how §2's biggest batch of
   errors was found.
 
@@ -227,3 +242,101 @@ Ordered by how likely they are to stop the first build.
   coordinator is the only writer of the program.
 * The Lab runs the *same* planner, renderer and loader as playback, so what it auditions is what the
   coordinator would install and the exported `renderKey` is reproducible on the CLI.
+
+---
+
+## 6. DJ customization on the phone
+
+What is wired, and how (the code is in `playback/DjCustomization.kt`, `playback/CustomizationImpl.kt`,
+`playback/CustomizationApi.kt`, `ui/dj/**`, `ui/nowplaying/NextTransitionSheet.kt`, `ui/lab/LabExtras.kt`).
+
+* **One profile directory**, `filesDir/dj`, laid out exactly like the CLI's `--profile-dir`: `presets/`,
+  `styles/`, `recipes/`, `pins.json`, `feedback.json`, plus `style` (one line: the chosen style id, read
+  synchronously when the engine starts so the first plan already has it). Nothing is created until something
+  is saved. It is app-private storage, so Android's auto-backup rules apply to it as to every other file there
+  (none are declared, see §3.7).
+* **Registry** = `DefaultStrategyRegistry.default()` + one `recipe:<id>` per usable recipe
+  (`RecipeCatalog` over `RecipeLibrary(filesDir/dj/recipes)`), held in a `LiveStrategyRegistry` that the
+  planner, the renderer, the controller and the Lab share; importing, duplicating or deleting a recipe swaps
+  its contents. Recipes are read (and validated at every knob setting) on a background thread after the
+  service starts; until then — the first plan after a cold start — only the 14 built-in strategies compete.
+* **Built-in recipes on Android.** They ship as Java resources in the `:engine:transitions` jar
+  (`recipes/index.txt` + nine `.json` files) and are read with `RecipeLibrary::class.java.classLoader`. AGP
+  packages the Java resources of JVM library dependencies into the APK, `packaging.resources.excludes` only
+  drops two `META-INF` entries, and ART's app class loader serves APK entries through `getResourceAsStream`,
+  so they should be found — **this is a belief, not a verified fact** (no device here). If they are not, the
+  library reports "the built-in recipe index is missing" as a problem at the top of Settings → DJ and the
+  app keeps working with the 14 strategies and the user's own recipes. The desktop test
+  `builtInRecipesLoadThroughTheClassLoaderAndJoinTheRegistry` proves the same code path on the JVM.
+* **Planner** = the engine's `DefaultTransitionPlanner` with a `PlannerCustomization` built from the profile:
+  presets (built-in + `presets/`), pins (the in-memory one-off override first, then `pins.json`) and the
+  learned multipliers (`feedback.json`). It sits behind `DjPlanner` so "Forget ratings" can swap in a planner
+  over a fresh learner (the engine's `FeedbackLearner` cannot be emptied in place). The previous ratings file
+  is kept as `feedback.json.bak`.
+* **Prefs shaping.** The chosen style (`StyleProfile.apply`) and then every active preset
+  (`PresetResolution.fold`) reshape the stored `TransitionPrefs` at the engine boundary only — in
+  `EngineControllerImpl` and in `TransitionLabImpl` — the same order the CLI uses for `--style`. The stored
+  prefs, what Settings shows and what `PlayerState.transitionPrefs` carries are never shaped, so a style is
+  never baked into them. A recipe switched off lands in `prefs.disabledStrategies` (`recipe:<id>`); an
+  active preset in `prefs.activePresets`; a style's preset replaces the user's for the same technique.
+* **One-off override for the next transition** (Now Playing → "Next transition" chip → sheet). Built from two
+  existing mechanisms: a *session pin* for the ordered pair current → next (in memory, keyed by both tracks'
+  `TrackAnalysis.identity` and, because the coordinator may still hold the stand-in analysis it started the
+  current track with, by that stand-in's `placeholder:<songId>` fingerprint), consulted by the planner before
+  the stored pins; and a *re-plan of that edge*: `EngineControllerImpl.replanNext()` gives the next song a new
+  engine-id generation (`QueueManager.queueItems(songs, generations)` → id `"<songId>~<n>"`) and re-installs
+  the queue like any queue edit. The coordinator keys edges and retained renders by the two engine ids, so the
+  edge (and any render already made for it) is dropped and planned again, now with the pin. The override is
+  cleared as soon as the current or the next song changes. `ReplanNextEdgeTest` runs this against the real
+  coordinator. Limits: it is refused while the transition is playing and with repeat-one; the planner still
+  falls back (with the reason in the sheet's notes) when the chosen technique does not fit the analysis the
+  coordinator holds; in battery-saver mode the coordinator skips non-live-capable techniques as always.
+* **Ratings.** The Lab's thumbs keep their weight nudge and now *also* record a rating in the learned
+  preferences; the Lab's blind A/B test renders two candidates, plays them as X and Y, and records up for the
+  winner and down for the other. The Lab's "Pin for this pair" now also writes an engine pin (identity-keyed)
+  into `pins.json`, so it steers playback; it still writes the Room `PairOverride` as before.
+* **Safety nets.** Nothing about customization can stop the service from starting: every file is read with
+  the engine's skip-and-report loaders, and the problems are listed at the top of every DJ screen. Importing
+  never overwrites one of the user's recipes without asking, keeps a recipe with errors only when the user says
+  so (it is then never used), and refuses files over 512 KB (recipes are a few KB).
+
+## 7. DJ customization: check on a device
+
+None of these screens has been seen: there is no SDK and no device here. Each needs a look in light, dark
+and black themes, with dynamic colour on and off, at the default and the largest font size.
+
+1. **Settings → DJ** (index): "Connecting…" progress before the service is up; the problems card (collapsed,
+   expanded); the five entries with their counts; the files path line.
+2. **Style**: None selected (fresh install); each of the six built-in styles selected (card border +
+   radio); "What it changes" expanded; a user style from `styles/` (the "Yours" label); a style file that no
+   longer exists (problem line). Check that choosing a style changes the next planned transition.
+3. **Recipes list**: loading; the nine built-ins; many recipes (import 20+ and scroll); an invalid recipe
+   (error icon, "Not used: n errors", no switch); a user recipe shadowing a built-in (the built-in shows
+   "Replaced…"); a recipe switched off. **Import**: picker cancelled (nothing happens, no dialog); a non-JSON
+   file (report with line/column); a recipe with errors ("Keep it anyway" / Cancel); a recipe whose id is
+   already one of the user's ("Replace" / Cancel); a file over 512 KB; success with warnings. Check that the
+   picker offers `.json` files from Downloads and from a cloud provider (MIME types differ).
+4. **Recipe detail**: description and meta line; enable switch; Export (SAF create, then open the file);
+   Share (chooser, JSON as text); Duplicate (new "(copy)" appears, id `<id>-copy`); Delete (user recipes
+   only, confirm, returns to the list); the problems list; the knob sliders (integer knobs step); the lane
+   plot for both decks at several knob settings, a deck with no lanes ("Plays unchanged"), a recipe that
+   cannot be resolved at some setting (red message). Check the lane colours against the surface in every
+   theme — contrast was not measured.
+5. **Presets**: grouped by technique; Defaults / a built-in / a user preset selected; a technique whose preset
+   the style decides (radios disabled, note shown); delete confirm; while connecting (the list is filled
+   once the engine is installed; the eight built-in presets are always there after that).
+6. **Pinned pairs**: empty state; a pin made in the Lab (labels "Title — Artist → …"); remove confirm.
+7. **Learned preferences**: empty; after several Lab ratings (multipliers above and below 1, counts);
+   Forget one technique; Forget all (confirm); the `feedback.json.bak` backup exists afterwards.
+8. **Now Playing → Next transition sheet**: loading; the ranked list with scores, reasons (Why?/Less), the
+   "Recipe", "Planned now" and "Your pick" tags; picking a technique (progress, snackbar, the queue badge
+   changes to the new plan); "Let Muisc choose"; a gated pair (album playback: picking disabled, reason
+   shown); during a transition (disabled); the last song (no next: error line); the unavailable list; "Open in
+   Transition Lab". Verify by ear that the chosen technique is the one played, including when the old
+   transition had already been rendered.
+9. **Transition Lab**: the Presets menu (none yet / load / Save as preset… dialog); the Recipe tag on recipe
+   candidates; the blind A/B card: rendering progress, Play X / Play Y / Stop, voting disabled until both were
+   heard, the reveal text, Close; thumbs up/down message now includes the learned factor.
+10. **Process death / service restart**: the style and all files survive; a one-off override does not (by
+    design); the DJ screens reconnect after the service is recreated.
+

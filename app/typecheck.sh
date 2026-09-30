@@ -11,6 +11,7 @@
 #   app/typecheck.sh          # core packages (data, data.db, data.prefs, di, playback, test) -- must be clean
 #   app/typecheck.sh ui       # core + ui/** + MainActivity/MuiscApplication (best effort, Compose is stubbed)
 #   app/typecheck.sh all      # alias for `ui`
+#   app/typecheck.sh test     # core, then RUNS app/src/test on the JUnit Platform (engine resources on the classpath)
 #
 set -u
 
@@ -36,6 +37,13 @@ TROVE="$(jar_for org.jetbrains.intellij.deps/trove4j 'trove4j-*.jar')"
 KTEST="$(jar_for org.jetbrains.kotlin/kotlin-test 'kotlin-test-2*.jar')"
 KTESTJ5="$(jar_for org.jetbrains.kotlin/kotlin-test-junit5 'kotlin-test-junit5-*.jar')"
 JUPITER_API="$(jar_for org.junit.jupiter/junit-jupiter-api 'junit-jupiter-api-*.jar')"
+COROUTINES_TEST="$(jar_for org.jetbrains.kotlinx/kotlinx-coroutines-test-jvm 'kotlinx-coroutines-test-jvm-*.jar')"
+JUPITER_ENGINE="$(jar_for org.junit.jupiter/junit-jupiter-engine 'junit-jupiter-engine-*.jar')"
+PLATFORM_LAUNCHER="$(jar_for org.junit.platform/junit-platform-launcher 'junit-platform-launcher-*.jar')"
+PLATFORM_ENGINE="$(jar_for org.junit.platform/junit-platform-engine 'junit-platform-engine-*.jar')"
+PLATFORM_COMMONS="$(jar_for org.junit.platform/junit-platform-commons 'junit-platform-commons-*.jar')"
+OPENTEST4J="$(jar_for org.opentest4j/opentest4j 'opentest4j-*.jar')"
+APIGUARDIAN="$(jar_for org.apiguardian/apiguardian-api 'apiguardian-api-*.jar')"
 
 for v in KC STDLIB COROUTINES SERCORE SERJSON; do
   if [ -z "${!v}" ]; then
@@ -45,13 +53,26 @@ for v in KC STDLIB COROUTINES SERCORE SERJSON; do
   fi
 done
 
-CP="$STDLIB:$COROUTINES:$SERCORE:$SERJSON:$ANNO:$KTEST:$KTESTJ5:$JUPITER_API"
+CP="$STDLIB:$COROUTINES:$SERCORE:$SERJSON:$ANNO:$KTEST:$KTESTJ5:$JUPITER_API:$COROUTINES_TEST"
+# Engine resources (the built-in recipes) are only needed at run time, by `test`.
+RESOURCES=""
 missing_engine=0
 for m in audio dsp analysis transitions metrics player; do
   d="$ENG/$m/build/classes/kotlin/main"
   [ -d "$d" ] || { echo "typecheck.sh: missing engine classes: $d" >&2; missing_engine=1; }
   CP="$CP:$d"
+  r="$ENG/$m/build/resources/main"
+  [ -d "$r" ] && RESOURCES="$RESOURCES:$r"
 done
+if [ "$MODE" = "test" ]; then
+  for v in JUPITER_ENGINE PLATFORM_LAUNCHER PLATFORM_ENGINE PLATFORM_COMMONS OPENTEST4J; do
+    if [ -z "${!v}" ]; then
+      echo "typecheck.sh: could not find the jar for \$$v under $M2 (needed to run the tests)" >&2
+      exit 2
+    fi
+  done
+  CP="$CP:$PLATFORM_LAUNCHER:$PLATFORM_ENGINE:$PLATFORM_COMMONS:$JUPITER_ENGINE:$OPENTEST4J${APIGUARDIAN:+:$APIGUARDIAN}"
+fi
 if [ "$missing_engine" = 1 ]; then
   echo "  Run './gradlew :engine:audio:compileKotlin :engine:dsp:compileKotlin :engine:analysis:compileKotlin \\" >&2
   echo "       :engine:transitions:compileKotlin :engine:metrics:compileKotlin :engine:player:compileKotlin'" >&2
@@ -107,6 +128,32 @@ if [ "$MODE" = "ui" ] || [ "$MODE" = "all" ]; then
   SRC="$SRC $K/ui $K/MainActivity.kt $K/MuiscApplication.kt"
 fi
 
+if [ "$MODE" = "test" ]; then
+  # A minimal JUnit Platform console: discovers every test class under dev.muisc.app and exits non-zero on a
+  # failure or when no test was found.
+  cat > "$GEN/RunAppTests.kt" <<'KT'
+package dev.muisc.typecheck
+
+import org.junit.platform.engine.discovery.DiscoverySelectors
+import org.junit.platform.launcher.core.LauncherDiscoveryRequestBuilder
+import org.junit.platform.launcher.core.LauncherFactory
+import org.junit.platform.launcher.listeners.SummaryGeneratingListener
+import java.io.PrintWriter
+import kotlin.system.exitProcess
+
+fun main() {
+    val request = LauncherDiscoveryRequestBuilder.request().selectors(DiscoverySelectors.selectPackage("dev.muisc.app")).build()
+    val listener = SummaryGeneratingListener()
+    LauncherFactory.create().execute(request, listener)
+    val summary = listener.summary
+    val out = PrintWriter(System.out, true)
+    summary.printFailuresTo(out, 40)
+    out.println("tests: ${summary.testsSucceededCount} passed, ${summary.testsFailedCount} failed, ${summary.testsSkippedCount} skipped, ${summary.testsFoundCount} found")
+    exitProcess(if (summary.totalFailureCount == 0L && summary.testsFoundCount > 0L) 0 else 1)
+}
+KT
+fi
+
 mkdir -p "$OUT/classes"
 java -Xmx2g -cp "$KC:$STDLIB:$ANNO:$COROUTINES:$TROVE" org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
   -no-stdlib -nowarn -jvm-target 17 \
@@ -119,6 +166,11 @@ java -Xmx2g -cp "$KC:$STDLIB:$ANNO:$COROUTINES:$TROVE" org.jetbrains.kotlin.cli.
   grep -v '^info:'
 
 status=${PIPESTATUS[0]}
+if [ "$MODE" = "test" ] && [ "$status" = 0 ]; then
+  echo
+  java -cp "$OUT/classes:$CP$RESOURCES" dev.muisc.typecheck.RunAppTestsKt
+  status=$?
+fi
 echo
 if [ "$status" = 0 ]; then
   echo "typecheck.sh [$MODE]: OK"

@@ -66,3 +66,8 @@ fun rememberScrollState(initial: Int = 0): ScrollState = ScrollState(initial)
 
 fun Modifier.verticalScroll(state: ScrollState, enabled: Boolean = true, reverseScrolling: Boolean = false): Modifier = this
 fun Modifier.horizontalScroll(state: ScrollState, enabled: Boolean = true, reverseScrolling: Boolean = false): Modifier = this
+
+@androidx.compose.runtime.Immutable
+class BorderStroke(val width: Dp, val brush: Brush)
+
+fun BorderStroke(width: Dp, color: Color): BorderStroke = BorderStroke(width, androidx.compose.ui.graphics.SolidColor(color))

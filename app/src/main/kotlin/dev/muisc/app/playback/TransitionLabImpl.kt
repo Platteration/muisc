@@ -38,6 +38,7 @@ import dev.muisc.transitions.TransitionPlan
 import dev.muisc.transitions.TransitionPlanner
 import dev.muisc.transitions.TransitionPrefs
 import dev.muisc.transitions.TransitionRenderer
+import dev.muisc.transitions.custom.PairPin
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -69,7 +70,8 @@ import kotlinx.serialization.json.put
  *  - [export] writes `<name>.wav`, `<name>.plan.json` and `<name>.report.json` to the public Music/Muisc/Renders
  *    folder (MediaStore on API 29+, the classic path below it, app-private storage if both are refused).
  *  - [rate] nudges `TransitionPrefs.strategyWeights` by ±0.1 and logs the vote; [pinForPair] writes a
- *    `PairOverride`.
+ *    `PairOverride` and, with a [customization], the engine [PairPin] (keyed by track identity) that the planner
+ *    reads, so a pin set in the Lab now decides playback too.
  */
 class TransitionLabImpl(
     context: Context,
@@ -88,6 +90,12 @@ class TransitionLabImpl(
     private val sinkFactory: (Int, Int) -> AudioSink,
     private val prefsProvider: () -> TransitionPrefs,
     private val pairAnalyzer: PairAnalyzer = DefaultPairAnalyzer(),
+    /**
+     * The DJ customization the playback engine uses: its style and active presets shape the prefs here exactly as
+     * they shape playback, and [pinForPair] also writes an engine [PairPin] into it so the pin steers playback.
+     * Null = no customization (prefs used as given, pins only recorded in Room).
+     */
+    private val customization: DjCustomization? = null,
 ) : TransitionLabApi {
 
     private val appContext: Context = context.applicationContext
@@ -348,6 +356,8 @@ class TransitionLabImpl(
     }
 
     override suspend fun pinForPair(a: Song, b: Song, strategyId: String?, params: Params?) {
+        val custom = customization
+        if (custom != null) withContext(Dispatchers.Default) { pinInProfile(custom, a, b, strategyId, params) }
         if (strategyId == null) {
             transitionDao.deleteOverride(a.id, b.id)
             return
@@ -356,12 +366,52 @@ class TransitionLabImpl(
         transitionDao.upsertOverride(PairOverride(aSongId = a.id, bSongId = b.id, strategyId = strategyId, paramsJson = paramsJson))
     }
 
+    /**
+     * The engine pin for (a, b), keyed by the tracks' identities (a hash of the decoded audio), so it survives file
+     * copies and re-tags. Only the strategy's own parameters are kept. The analyses come from
+     * [AndroidAnalysisService.analysisOf], which always returns (or computes) the real analysis, never a stand-in.
+     */
+    private fun pinInProfile(custom: DjCustomization, a: Song, b: Song, strategyId: String?, params: Params?) {
+        val aAnalysis = trackRef(a).analysis
+        val bAnalysis = trackRef(b).analysis
+        if (strategyId == null) {
+            custom.removePin(aAnalysis.identity, bAnalysis.identity)
+            return
+        }
+        val specs = registry.strategy(strategyId)?.params.orEmpty().map { it.id }.toSet()
+        val own = params?.values?.filterKeys { it in specs }.orEmpty()
+        custom.setPin(
+            PairPin(
+                aFingerprint = aAnalysis.identity,
+                bFingerprint = bAnalysis.identity,
+                strategyId = strategyId,
+                params = if (own.isEmpty()) null else Params(own),
+                aLabel = label(a),
+                bLabel = label(b),
+                note = "pinned in the Lab",
+            ),
+        )
+    }
+
+    private fun label(song: Song): String = if (song.artist.isBlank()) song.title else "${song.title} — ${song.artist}"
+
     // ================================================================================================ helpers
 
-    /** Prefs as the engine must see them on this device (the stored rate may come from another device or the CLI). */
-    private fun enginePrefs(prefs: TransitionPrefs): TransitionPrefs =
-        if (prefs.sampleRate == sampleRate && prefs.channels == channels) prefs
-        else prefs.copy(sampleRate = sampleRate, channels = channels)
+    /**
+     * Prefs as the engine must see them on this device (the stored rate may come from another device or the CLI),
+     * shaped by the user's style and active presets exactly as playback shapes them.
+     */
+    private fun enginePrefs(prefs: TransitionPrefs): TransitionPrefs {
+        val shaped = customization?.let { c ->
+            try {
+                c.shape(prefs)
+            } catch (t: Throwable) {
+                prefs
+            }
+        } ?: prefs
+        return if (shaped.sampleRate == sampleRate && shaped.channels == channels) shaped
+        else shaped.copy(sampleRate = sampleRate, channels = channels)
+    }
 
     /** Analysed (cache first) and wrapped as the engine's [TrackRef]; blocking, always called off the main thread. */
     private fun trackRef(song: Song): TrackRef =

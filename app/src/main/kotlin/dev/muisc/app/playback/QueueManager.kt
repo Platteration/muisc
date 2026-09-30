@@ -203,9 +203,15 @@ class QueueManager {
         return snapshot()
     }
 
-    /** Index of the song whose engine id is [id] (the engine reports track changes by id), or -1. */
+    /**
+     * Index of the song whose engine id is [id] (the engine reports track changes by id), or -1. A re-plan suffix
+     * ([queueItems] with generations) is ignored: `"42~1"` is song 42.
+     */
     @Synchronized
-    fun indexOfEngineId(id: String): Int = order.indexOfFirst { trackId(it) == id }
+    fun indexOfEngineId(id: String): Int {
+        val base = baseEngineId(id)
+        return order.indexOfFirst { trackId(it) == base }
+    }
 
     /** Restores a persisted queue (ids already resolved to songs by the caller). */
     @Synchronized
@@ -268,6 +274,25 @@ class QueueManager {
         )
 
         fun queueItems(songs: List<Song>): List<QueueItem> = songs.map { queueItem(it) }
+
+        /**
+         * [queueItems], with the engine id of every song listed in [generations] suffixed `~<generation>`. The
+         * coordinator keys its edges (and its retained renders) by the two engine ids of the pair, so giving the next
+         * song a new generation makes it drop the planned / rendered transition into that song and plan it again —
+         * with whatever pin is in force now — while the song itself, its analysis and the current track's body are
+         * untouched. This is how "use this technique for the next transition" re-plans one edge with the engine's
+         * existing queue mechanism.
+         */
+        fun queueItems(songs: List<Song>, generations: Map<Long, Int>): List<QueueItem> = songs.map { song ->
+            val item = queueItem(song)
+            val generation = generations[song.id]
+            if (generation == null || generation <= 0) item else item.copy(id = item.id + GENERATION_SEPARATOR + generation)
+        }
+
+        /** The plain engine id of a (possibly generation-suffixed) engine id. */
+        fun baseEngineId(id: String): String = id.substringBefore(GENERATION_SEPARATOR)
+
+        const val GENERATION_SEPARATOR = '~'
 
         /**
          * A [TrackRef] for a song whose analysis is not available yet: an EMPTY beat grid, no tempo, loudness at the

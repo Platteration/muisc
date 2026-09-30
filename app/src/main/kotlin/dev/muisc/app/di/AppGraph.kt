@@ -14,6 +14,7 @@ import dev.muisc.app.data.RoomAnalysisCache
 import dev.muisc.app.data.ScanResult
 import dev.muisc.app.data.db.MuiscDatabase
 import dev.muisc.app.data.prefs.SettingsRepository
+import dev.muisc.app.playback.CustomizationApi
 import dev.muisc.app.playback.EngineController
 import dev.muisc.app.playback.TransitionLabApi
 import kotlinx.coroutines.CoroutineScope
@@ -65,6 +66,7 @@ object AppGraph {
 
     private val delegatingController by lazy { DelegatingEngineController(scope) { startPlaybackService() } }
     private val delegatingLab by lazy { DelegatingTransitionLab({ startPlaybackService() }) }
+    private val delegatingCustomization by lazy { DelegatingCustomization(scope, { startPlaybackService() }) }
 
     /** The controller the UI, the notification and the media session adapter drive. Stable for the process lifetime. */
     val engineController: EngineController get() = delegatingController
@@ -72,19 +74,24 @@ object AppGraph {
     /** The Transition Lab entry point. Stable for the process lifetime. */
     val lab: TransitionLabApi get() = delegatingLab
 
+    /** Styles, recipes, presets, pins, learned preferences and the next-transition override. Stable for the process lifetime. */
+    val customization: CustomizationApi get() = delegatingCustomization
+
     /** True while a real playback implementation is installed. */
     val playbackInstalled: StateFlow<Boolean> get() = delegatingController.installed
 
     /** Called by the playback service once its engine is ready. Buffered UI commands are replayed in order. */
-    fun installPlayback(controller: EngineController, lab: TransitionLabApi) {
+    fun installPlayback(controller: EngineController, lab: TransitionLabApi, customization: CustomizationApi? = null) {
         delegatingController.install(controller)
         delegatingLab.install(lab)
+        if (customization != null) delegatingCustomization.install(customization)
     }
 
     /** Called by the playback service on destroy; the UI falls back to the idle state until the next install. */
-    fun uninstallPlayback(controller: EngineController? = null, lab: TransitionLabApi? = null) {
+    fun uninstallPlayback(controller: EngineController? = null, lab: TransitionLabApi? = null, customization: CustomizationApi? = null) {
         delegatingController.uninstall(controller)
         delegatingLab.uninstall(lab)
+        delegatingCustomization.uninstall(customization)
     }
 
     /**

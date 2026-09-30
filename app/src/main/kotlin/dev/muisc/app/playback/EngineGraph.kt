@@ -15,7 +15,8 @@ import dev.muisc.transitions.DefaultTransitionRenderer
 import dev.muisc.transitions.RenderedTransition
 import dev.muisc.transitions.TransitionInput
 import dev.muisc.transitions.live.DefaultLivePlanFactory
-import dev.muisc.transitions.planner.DefaultTransitionPlanner
+import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
@@ -26,8 +27,14 @@ import kotlinx.coroutines.launch
  *  - **Engine rate** = `AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE` (usually 48 000), so nothing resamples on the way
  *    to `AudioTrack`; stereo output. Every `TransitionPrefs` that reaches the engine is forced to this format.
  *  - **Limits** = [EngineLimits.LOW_RAM] on a low-RAM device or below a 192 MB heap, else [EngineLimits.PHONE].
- *  - **Catalogue** = `DefaultStrategyRegistry.default()` with the default planner, the shared renderer over the
- *    Android window loader, pseudo-stems (ML stems only when a model is really installed, see [MlStemSeparatorOnnx]).
+ *  - **Catalogue** = `DefaultStrategyRegistry.default()` plus one `recipe:<id>` strategy per usable recipe (the
+ *    built-ins shipped in the engine jar's resources + the user's own in `filesDir/dj/recipes`), read in the
+ *    background after startup — until then the 14 built-in strategies plan alone. The planner carries the user's
+ *    [DjCustomization] (presets, stored pins, the one-off override, learned weights from `filesDir/dj`) and the
+ *    shared renderer runs over the Android window loader with pseudo-stems (ML stems only when a model is really
+ *    installed, see [MlStemSeparatorOnnx]).
+ *  - **Style** = the chosen listening style and the active presets reshape every `TransitionPrefs` at the engine
+ *    boundary (controller and Lab), never the stored settings.
  *  - **Render gate** = `ArtifactMetrics.installChecks`: a render whose worst verdict is FAIL is never installed.
  */
 object EngineGraph {
@@ -41,19 +48,27 @@ object EngineGraph {
     /** `ActivityManager.memoryClass` below this (MB) counts as a low-RAM device (DESIGN §7.4). */
     const val LOW_RAM_MEMORY_CLASS = 192
 
+    /** What [create] builds: the controller the UI drives, and the Lab and the DJ customization over the same engine. */
+    class EngineParts(val controller: EngineControllerImpl, val lab: TransitionLabApi, val customization: CustomizationImpl)
+
     /**
-     * The whole engine, wired. Returns the controller the UI drives and the Lab over the same planner / renderer.
-     * Call once per service lifetime; `EngineController.release()` tears everything down.
+     * The whole engine, wired. Returns the controller the UI drives and the Lab and the DJ customization over the
+     * same planner / renderer. Call once per service lifetime; `EngineController.release()` and
+     * `CustomizationImpl.stop()` tear everything down.
+     *
+     * Customization problems never stop startup (AGENTS.md §5): unreadable recipe / preset / style / pin / rating
+     * files are skipped and listed in the DJ settings.
      */
-    fun create(context: Context, appGraph: AppGraph = AppGraph): Pair<EngineController, TransitionLabApi> {
+    fun create(context: Context, appGraph: AppGraph = AppGraph): EngineParts {
         val app = context.applicationContext
         val sampleRate = engineSampleRate(app)
         val limits = limitsFor(app)
 
         val streams = AndroidEngineStreamFactory(app)
         val loader = AndroidTrackAudioLoader(app)
-        val registry = DefaultStrategyRegistry.default()
-        val planner = DefaultTransitionPlanner(registry)
+        val dj = DjCustomization(File(app.filesDir, DjCustomization.PROFILE_DIR), DefaultStrategyRegistry.default())
+        val registry = dj.registry
+        val planner = dj.planner
         val renderer = DefaultTransitionRenderer(loader, registry, MlStemSeparatorOnnx.best(app))
         val programBuilder = DefaultProgramBuilder()
         val liveFactory = DefaultLivePlanFactory()
@@ -90,6 +105,7 @@ object EngineGraph {
             onSongStarted = { song, playbackContext ->
                 appGraph.scope.launch { appGraph.libraryRepository.recordPlay(song.id, playbackContext) }
             },
+            shaper = dj,
         )
 
         val lab = TransitionLabImpl(
@@ -107,7 +123,21 @@ object EngineGraph {
             transitionDao = appGraph.db.transitionDao(),
             sinkFactory = sinkFactory,
             prefsProvider = { controller.state.value.transitionPrefs },
+            customization = dj,
         )
+
+        val customization = CustomizationImpl(
+            context = app,
+            core = dj,
+            controller = controller,
+            analyses = analyses,
+            settings = appGraph.settings,
+            scope = appGraph.scope,
+        )
+        customization.start()
+        // Recipes are validated at every knob setting, which is too slow for the main thread; they join the
+        // registry when read. A failure is reported by the DJ settings, never thrown.
+        appGraph.scope.launch(Dispatchers.IO) { customization.refresh() }
 
         val powerMonitor = PowerModeMonitor(app) { mode -> controller.setPowerMode(mode) }
         powerMonitor.start()
@@ -126,7 +156,7 @@ object EngineGraph {
             AnalysisWorker.enqueuePeriodic(app, onlyWhileCharging)
         }
 
-        return controller to lab
+        return EngineParts(controller, lab, customization)
     }
 
     /** The device's output rate — the rate everything in the engine is rendered at. */

@@ -50,6 +50,7 @@ class PlaybackService : MediaLibraryService() {
     private var session: MediaLibrarySession? = null
     private var controller: EngineController? = null
     private var lab: TransitionLabApi? = null
+    private var customization: CustomizationImpl? = null
     private var noisy: BecomingNoisyReceiver? = null
 
     private val library get() = AppGraph.libraryRepository
@@ -57,10 +58,11 @@ class PlaybackService : MediaLibraryService() {
     override fun onCreate() {
         super.onCreate()
         val engine = createEngine()
-        val engineController = engine.first
+        val engineController = engine.controller
         controller = engineController
-        lab = engine.second
-        AppGraph.installPlayback(engineController, engine.second)
+        lab = engine.lab
+        customization = engine.customization
+        AppGraph.installPlayback(engineController, engine.lab, engine.customization)
 
         val player = MuiscPlayer(engineController, serviceScope) { ids ->
             library.songsByIds(ids.mapNotNull { it.toLongOrNull() })
@@ -78,9 +80,10 @@ class PlaybackService : MediaLibraryService() {
 
     /**
      * Builds the engine graph. [EngineGraph] wires the ProgramPlayer, the AudioTrack sink, the planner/renderer and
-     * the TransitionCoordinator, and returns the controller plus the Transition Lab that share them.
+     * the TransitionCoordinator, and returns the controller plus the Transition Lab and the DJ customization that
+     * share them.
      */
-    private fun createEngine(): Pair<EngineController, TransitionLabApi> = EngineGraph.create(this)
+    private fun createEngine(): EngineGraph.EngineParts = EngineGraph.create(this)
 
     /** Listens for unplugged headphones only while playing. */
     private fun observePlayback(engineController: EngineController) {
@@ -131,7 +134,9 @@ class PlaybackService : MediaLibraryService() {
             release()
         }
         session = null
-        AppGraph.uninstallPlayback(controller, lab)
+        AppGraph.uninstallPlayback(controller, lab, customization)
+        customization?.stop()
+        customization = null
         controller?.release()
         controller = null
         lab = null

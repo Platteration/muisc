@@ -14,6 +14,12 @@ import dev.muisc.app.ui.detail.ArtistDetailScreen
 import dev.muisc.app.ui.detail.GenreDetailScreen
 import dev.muisc.app.ui.detail.PlaylistDetailScreen
 import dev.muisc.app.ui.detail.SmartPlaylistScreen
+import dev.muisc.app.ui.dj.DjLearnedScreen
+import dev.muisc.app.ui.dj.DjPinsScreen
+import dev.muisc.app.ui.dj.DjPresetsScreen
+import dev.muisc.app.ui.dj.DjRecipeDetailScreen
+import dev.muisc.app.ui.dj.DjRecipesScreen
+import dev.muisc.app.ui.dj.DjStyleScreen
 import dev.muisc.app.ui.lab.TransitionLabScreen
 import dev.muisc.app.ui.library.AlbumsScreen
 import dev.muisc.app.ui.library.ArtistsScreen
@@ -47,6 +53,12 @@ object Routes {
     const val LAB = "lab?a={a}&b={b}"
     const val SETTINGS = "settings"
     const val SETTINGS_SECTION = "settings/{section}"
+    const val DJ_STYLE = "dj/style"
+    const val DJ_RECIPES = "dj/recipes"
+    const val DJ_RECIPE = "dj/recipe/{id}"
+    const val DJ_PRESETS = "dj/presets"
+    const val DJ_PINS = "dj/pins"
+    const val DJ_LEARNED = "dj/learned"
 
     fun album(id: Long) = "album/$id"
     fun artist(id: Long) = "artist/$id"
@@ -55,6 +67,7 @@ object Routes {
     fun genre(id: Long) = "genre/$id"
     fun lab(a: Long? = null, b: Long? = null) = "lab?a=${a ?: -1L}&b=${b ?: -1L}"
     fun settings(section: String) = "settings/$section"
+    fun djRecipe(id: String) = "dj/recipe/$id"
 
     /** Destinations that show the bottom navigation bar. */
     val topLevel: List<String> = listOf(HOME, SONGS, ALBUMS, ARTISTS, PLAYLISTS)
@@ -79,6 +92,12 @@ class MuiscNavigator(private val navController: NavHostController) {
     fun toLab(a: Long? = null, b: Long? = null) = navController.navigate(Routes.lab(a, b))
     fun toSettings() = navController.navigate(Routes.SETTINGS)
     fun toSettingsSection(section: String) = navController.navigate(Routes.settings(section))
+    fun toDjStyle() = navController.navigate(Routes.DJ_STYLE)
+    fun toDjRecipes() = navController.navigate(Routes.DJ_RECIPES)
+    fun toDjRecipe(id: String) = navController.navigate(Routes.djRecipe(id))
+    fun toDjPresets() = navController.navigate(Routes.DJ_PRESETS)
+    fun toDjPins() = navController.navigate(Routes.DJ_PINS)
+    fun toDjLearned() = navController.navigate(Routes.DJ_LEARNED)
 
     fun toNowPlaying() {
         navController.navigate(Routes.NOW_PLAYING) { launchSingleTop = true }
@@ -145,5 +164,14 @@ fun MuiscNavHost(
         composable(Routes.SETTINGS_SECTION, arguments = listOf(navArgument("section") { type = NavType.StringType })) {
             SettingsScreen(section = it.arguments?.getString("section"), navigator = navigator)
         }
+
+        composable(Routes.DJ_STYLE) { DjStyleScreen(navigator) }
+        composable(Routes.DJ_RECIPES) { DjRecipesScreen(navigator) }
+        composable(Routes.DJ_RECIPE, arguments = listOf(navArgument("id") { type = NavType.StringType })) {
+            DjRecipeDetailScreen(recipeId = it.arguments?.getString("id") ?: "", navigator = navigator)
+        }
+        composable(Routes.DJ_PRESETS) { DjPresetsScreen(navigator) }
+        composable(Routes.DJ_PINS) { DjPinsScreen(navigator) }
+        composable(Routes.DJ_LEARNED) { DjLearnedScreen(navigator) }
     }
 }

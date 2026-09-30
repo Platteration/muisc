@@ -5,7 +5,7 @@ type-checked on a machine with no Android SDK (the engine and the CLI build anyw
 is unreachable in the authoring sandbox, so the Android Gradle Plugin cannot be resolved and
 `settings.gradle.kts` leaves `:app` out of the build).
 
-It contains 70 hand-written Kotlin files (~5 000 lines) declaring the *signatures* of the platform and
+It contains 71 hand-written Kotlin files (~5 100 lines) declaring the *signatures* of the platform and
 library APIs the app uses — `android.*`, `androidx.*` (activity, annotation, core, lifecycle,
 navigation, palette, room, datastore, work), Compose (runtime, ui, foundation, material3, material
 icons), Media3 (common + session), Coil 2 and the two Guava types Media3 exposes.
@@ -15,7 +15,14 @@ Run it with [`app/typecheck.sh`](../../typecheck.sh):
 ```
 app/typecheck.sh          # data, data.db, data.prefs, di, playback + app/src/test  -> must be clean
 app/typecheck.sh ui       # the above plus ui/**, MainActivity, MuiscApplication    -> best effort
+app/typecheck.sh test     # core, then RUNS app/src/test on the JUnit Platform       -> must pass
 ```
+
+`test` compiles exactly what `core` compiles, then runs every test class under `dev.muisc.app` with the JUnit
+Platform launcher from the Gradle cache (junit-jupiter-engine, junit-platform-launcher — the versions `:app`'s own
+`testImplementation` already resolves), with the engine modules' `build/resources/main` on the run-time classpath
+so the built-in recipes are found through the class loader as they are in the APK. It exits non-zero when a test
+fails or when no test was found.
 
 The harness invokes the Kotlin 2.1.20 compiler (`kotlin-compiler-embeddable`, the same version the
 Gradle build uses) directly, with:
@@ -72,9 +79,11 @@ Read this list before trusting a green run.
 5. **No KSP, no R8/ProGuard, no packaging, no dependency resolution.** The real versions in
    `gradle/libs.versions.toml` are never resolved, so an API that moved between the assumed version
    and the pinned one will only show up on a real build.
-6. **Nothing is executed.** This is a type-check. The app's own unit tests (`FolderTreeTest`,
-   `GaplessTagParserTest`) are pure Kotlin and do run — see `docs/ANDROID_BUILD_NOTES.md` — but no
-   Android behaviour is exercised.
+6. **Nothing Android is executed.** This is a type-check. The app's own unit tests are pure Kotlin and
+   run with `app/typecheck.sh test` (see `docs/ANDROID_BUILD_NOTES.md`), but no Android behaviour is
+   exercised: a test class that touched a stubbed Android API would run the stub, so the tests are kept to
+   code that needs none (`FolderTree`, `GaplessTagParser`, `QueueManager` ids, `DjCustomization`, the
+   coordinator re-plan).
 
 ## Maintaining the stubs
 

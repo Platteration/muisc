@@ -2,6 +2,7 @@
 
 package androidx.compose.material3
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.ColumnScope
@@ -77,7 +78,7 @@ fun Surface(
     contentColor: Color = Color.Unspecified,
     tonalElevation: Dp = 0.dp,
     shadowElevation: Dp = 0.dp,
-    border: Any? = null,
+    border: BorderStroke? = null,
     content: @Composable () -> Unit,
 ) {
     content()
@@ -93,7 +94,7 @@ fun Surface(
     contentColor: Color = Color.Unspecified,
     tonalElevation: Dp = 0.dp,
     shadowElevation: Dp = 0.dp,
-    border: Any? = null,
+    border: BorderStroke? = null,
     content: @Composable () -> Unit,
 ) {
     content()
@@ -160,7 +161,7 @@ fun Card(
     shape: Shape = RectangleShapeCompat,
     colors: CardColors = CardColors(),
     elevation: CardElevation = CardElevation(),
-    border: Any? = null,
+    border: BorderStroke? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
 }
@@ -173,7 +174,7 @@ fun Card(
     shape: Shape = RectangleShapeCompat,
     colors: CardColors = CardColors(),
     elevation: CardElevation = CardElevation(),
-    border: Any? = null,
+    border: BorderStroke? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
 }
@@ -269,7 +270,7 @@ fun Button(
     shape: Shape = RectangleShapeCompat,
     colors: ButtonColors = ButtonColors(),
     elevation: ButtonElevation? = null,
-    border: Any? = null,
+    border: BorderStroke? = null,
     contentPadding: PaddingValues = PaddingValues.Zero,
     content: @Composable RowScope.() -> Unit,
 ) {
@@ -283,7 +284,7 @@ fun TextButton(
     shape: Shape = RectangleShapeCompat,
     colors: ButtonColors = ButtonColors(),
     elevation: ButtonElevation? = null,
-    border: Any? = null,
+    border: BorderStroke? = null,
     contentPadding: PaddingValues = PaddingValues.Zero,
     content: @Composable RowScope.() -> Unit,
 ) {
@@ -297,7 +298,7 @@ fun OutlinedButton(
     shape: Shape = RectangleShapeCompat,
     colors: ButtonColors = ButtonColors(),
     elevation: ButtonElevation? = null,
-    border: Any? = null,
+    border: BorderStroke? = null,
     contentPadding: PaddingValues = PaddingValues.Zero,
     content: @Composable RowScope.() -> Unit,
 ) {
@@ -311,7 +312,7 @@ fun FilledTonalButton(
     shape: Shape = RectangleShapeCompat,
     colors: ButtonColors = ButtonColors(),
     elevation: ButtonElevation? = null,
-    border: Any? = null,
+    border: BorderStroke? = null,
     contentPadding: PaddingValues = PaddingValues.Zero,
     content: @Composable RowScope.() -> Unit,
 ) {
@@ -521,9 +522,6 @@ class SelectableChipColors internal constructor()
 
 @Immutable
 class ChipBorder internal constructor()
-
-@Immutable
-class BorderStroke internal constructor()
 
 object AssistChipDefaults {
     @Composable

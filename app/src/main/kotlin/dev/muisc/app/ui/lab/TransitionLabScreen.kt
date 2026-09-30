@@ -83,6 +83,7 @@ import dev.muisc.transitions.Marker
 import dev.muisc.transitions.PairFeatures
 import dev.muisc.transitions.PlanCandidate
 import dev.muisc.transitions.RenderReport
+import dev.muisc.transitions.recipe.TransitionRecipe
 
 private enum class Deck { A, B }
 
@@ -92,6 +93,7 @@ fun TransitionLabScreen(initialA: Long, initialB: Long, navigator: MuiscNavigato
     val vm: LabViewModel = viewModel(factory = AppViewModelFactory)
     val state by vm.state.collectAsStateWithLifecycle()
     val allSongs by vm.allSongs.collectAsStateWithLifecycle()
+    val djState by vm.djState.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var picking by remember { mutableStateOf<Deck?>(null) }
 
@@ -186,6 +188,22 @@ fun TransitionLabScreen(initialA: Long, initialB: Long, navigator: MuiscNavigato
                         onClick = { vm.selectCandidate(index) },
                     )
                 }
+
+                // --- Blind A/B ---
+                val ab = state.ab
+                if (ab != null) {
+                    item(key = "ab") {
+                        AbTestCard(test = ab, onPlay = vm::playAb, onStop = vm::stopAudition, onVote = vm::voteAb, onClose = vm::closeAb)
+                    }
+                } else if (ranked.candidates.size >= 2) {
+                    item(key = "ab-start") {
+                        OutlinedButton(
+                            onClick = vm::startAb,
+                            enabled = state.ready && !state.busy,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                        ) { Text(stringResource(R.string.lab_ab_start)) }
+                    }
+                }
             }
 
             // --- Parameters ---
@@ -216,6 +234,12 @@ fun TransitionLabScreen(initialA: Long, initialB: Long, navigator: MuiscNavigato
                                 Text("• $note", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
                             }
                         }
+                        PresetMenu(
+                            presets = djState.presets.filter { it.strategyId == selected.strategy.id },
+                            onLoad = vm::loadPreset,
+                            onSave = vm::savePreset,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
                         ParamEditor(specs = selected.strategy.params, params = state.params, onChange = vm::setParam)
                     }
                 }
@@ -434,6 +458,14 @@ private fun CandidateRow(candidate: PlanCandidate, selected: Boolean, onClick: (
         Column(Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(candidate.strategy.displayName, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                if (candidate.strategy.id.startsWith(TransitionRecipe.STRATEGY_PREFIX)) {
+                    Text(
+                        stringResource(R.string.lab_recipe_tag),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
+                }
                 Text(formatScore(candidate.score), style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
             }
             val reasons = candidate.applicability.reasons

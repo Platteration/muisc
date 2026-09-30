@@ -75,6 +75,7 @@ import dev.muisc.app.ui.components.EmptyState
 import dev.muisc.app.ui.components.artUri
 import dev.muisc.app.ui.components.formatDuration
 import dev.muisc.app.ui.viewmodel.AppViewModelFactory
+import dev.muisc.app.ui.viewmodel.DjViewModel
 import dev.muisc.app.ui.viewmodel.PlayerViewModel
 import dev.muisc.app.ui.viewmodel.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
@@ -121,6 +122,17 @@ fun NowPlayingScreen(navigator: MuiscNavigator) {
         artColors = if (layout == NowPlayingLayout.ADAPTIVE) extractArtColors(context, song.artUri()) else null
     }
 
+    // The "Next transition" chip opens a sheet to pick the upcoming technique; the Lab is one tap away from it.
+    var showNextSheet by remember { mutableStateOf(false) }
+    if (showNextSheet) {
+        val djVm: DjViewModel = viewModel(factory = AppViewModelFactory)
+        NextTransitionSheet(
+            vm = djVm,
+            onDismiss = { showNextSheet = false },
+            onOpenLab = { navigator.toLab(song.id, state.next?.id) },
+        )
+    }
+
     val body: @Composable (showArt: Boolean, accent: Color?) -> Unit = { showArt, accent ->
         PlayerBody(
             state = state,
@@ -134,7 +146,7 @@ fun NowPlayingScreen(navigator: MuiscNavigator) {
             onPrevious = playerVm::previous,
             onShuffle = playerVm::toggleShuffle,
             onRepeat = playerVm::cycleRepeat,
-            onOpenLab = { navigator.toLab(song.id, state.next?.id) },
+            onOpenNextTransition = { showNextSheet = true },
         )
     }
 
@@ -242,7 +254,7 @@ private fun PlayerBody(
     onPrevious: () -> Unit,
     onShuffle: () -> Unit,
     onRepeat: () -> Unit,
-    onOpenLab: () -> Unit,
+    onOpenNextTransition: () -> Unit,
 ) {
     val accentColor = accent ?: MaterialTheme.colorScheme.primary
     Column(
@@ -365,7 +377,7 @@ private fun PlayerBody(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                EdgeBadge(edge = edge, onClick = onOpenLab)
+                EdgeBadge(edge = edge, onClick = onOpenNextTransition)
             }
         }
         state.error?.let { err ->

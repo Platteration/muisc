@@ -15,6 +15,7 @@ object AppViewModelFactory : ViewModelProvider.Factory {
         modelClass.isAssignableFrom(PlayerViewModel::class.java) -> PlayerViewModel() as T
         modelClass.isAssignableFrom(SettingsViewModel::class.java) -> SettingsViewModel(AppGraph.settings) as T
         modelClass.isAssignableFrom(LabViewModel::class.java) -> LabViewModel(AppGraph.libraryRepository) as T
+        modelClass.isAssignableFrom(DjViewModel::class.java) -> DjViewModel() as T
         else -> throw IllegalArgumentException("Unknown ViewModel ${modelClass.name}")
     }
 }

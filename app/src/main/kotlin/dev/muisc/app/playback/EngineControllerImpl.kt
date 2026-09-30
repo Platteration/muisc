@@ -42,6 +42,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -85,13 +86,25 @@ class EngineControllerImpl(
     private val persistence: QueuePersistence? = null,
     /** Called on the pump thread when a track starts playing (play history). */
     private val onSongStarted: ((Song, PlaybackContext) -> Unit)? = null,
+    /** The user's style and active presets, applied to the stored prefs before the engine sees them. */
+    private val shaper: PrefsShaper = PrefsShaper.IDENTITY,
 ) : EngineController, DuckableEngine {
 
     private val appContext: Context = context.applicationContext
 
-    /** The engine's own prefs: whatever the user stored, forced to the real engine format. */
+    /** The stored prefs, forced to the real engine format: what [PlayerState.transitionPrefs] shows. */
     @Volatile
-    private var prefs: TransitionPrefs = normalize(TransitionPrefs())
+    private var basePrefs: TransitionPrefs = normalize(TransitionPrefs())
+
+    /** The engine's own prefs: [basePrefs] shaped by the user's style and active presets ([shaper]). */
+    @Volatile
+    private var prefs: TransitionPrefs = shapeSafely(basePrefs)
+
+    /**
+     * Songs whose engine id carries a re-plan generation (see [QueueManager.queueItems]); bumped by [replanNext],
+     * cleared when a new queue is installed. Guarded by itself.
+     */
+    private val replanGenerations = HashMap<Long, Int>()
 
     private val player = ProgramPlayer(sampleRate, channels, limits, streams, prefs, realtime = true)
 
@@ -124,7 +137,7 @@ class EngineControllerImpl(
     /** Queue bookkeeping, state publishing and persistence (never the audio thread). */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    private val _state = MutableStateFlow(PlayerState(transitionPrefs = prefs))
+    private val _state = MutableStateFlow(PlayerState(transitionPrefs = basePrefs))
     override val state: StateFlow<PlayerState> get() = _state
 
     // ---- transport handshake with the audio thread ----
@@ -184,13 +197,15 @@ class EngineControllerImpl(
 
     init {
         scope.launch {
-            settings.transitionPrefs.collect { stored ->
+            // A new style (shaper.version) re-shapes the stored prefs exactly like a settings change does.
+            combine(settings.transitionPrefs, shaper.version) { stored, _ -> stored }.collect { stored ->
                 val next = normalize(stored)
                 val wasEnabled = prefs.enabled
-                prefs = next
+                basePrefs = next
+                prefs = shapeSafely(next)
                 _state.update { it.copy(transitionPrefs = next) }
                 // A material change only reaches planned edges on the next install; do it now while stopped.
-                if (!_state.value.isPlaying && wasEnabled != next.enabled) install(null)
+                if (!_state.value.isPlaying && wasEnabled != prefs.enabled) install(null)
             }
         }
         scope.launch {
@@ -283,6 +298,7 @@ class EngineControllerImpl(
 
     override fun setQueue(songs: List<Song>, startIndex: Int, context: PlaybackContext, playNow: Boolean) {
         pendingRestoreMs = 0L
+        synchronized(replanGenerations) { replanGenerations.clear() }
         queue.setQueue(songs, startIndex, context)
         install(playNow, restart = true)
     }
@@ -317,6 +333,7 @@ class EngineControllerImpl(
     }
 
     override fun clearQueue() {
+        synchronized(replanGenerations) { replanGenerations.clear() }
         queue.clear()
         pendingRestoreMs = 0L
         player.submit(EngineCommand.SetProgram(PlaybackProgram(emptyList())))
@@ -327,7 +344,7 @@ class EngineControllerImpl(
         }
         coordinator.onQueue(PlaybackContext.SINGLE, emptyList(), 0)
         edgeStrategies.clear()
-        _state.value = PlayerState(transitionPrefs = prefs)
+        _state.value = PlayerState(transitionPrefs = basePrefs)
         abandonFocus()
         persist()
     }
@@ -345,7 +362,8 @@ class EngineControllerImpl(
 
     override fun updateTransitionPrefs(prefs: TransitionPrefs) {
         val next = normalize(prefs)
-        this.prefs = next
+        basePrefs = next
+        this.prefs = shapeSafely(next)
         _state.update { it.copy(transitionPrefs = next) }
         if (!_state.value.isPlaying) install(null)
     }
@@ -405,6 +423,29 @@ class EngineControllerImpl(
     /** The coordinator's human-readable decision log (Lab / bug reports). */
     fun transitionLog(): List<String> = coordinator.transitionLog
 
+    /** The prefs the engine plans and renders with right now: the stored prefs shaped by style and presets. */
+    fun effectivePrefs(): TransitionPrefs = prefs
+
+    /**
+     * Drops the planned (or rendered, or retained) transition out of the current song and plans it again, so a
+     * pin set a moment ago (the one-off "use this technique for the next transition") takes effect. Works by giving
+     * the next song a new engine-id generation ([QueueManager.queueItems]) and re-installing the queue the way any
+     * queue edit does: the current track keeps playing, only the edge into the next song is re-planned.
+     *
+     * Returns false (and changes nothing) when there is no next song in the queue order, with repeat-one on, or
+     * while the transition into it is already playing.
+     */
+    fun replanNext(): Boolean {
+        if (released) return false
+        if (_state.value.inTransition) return false
+        val snapshot = queue.snapshot()
+        if (snapshot.repeat == RepeatMode.ONE) return false
+        val next = snapshot.songs.getOrNull(snapshot.index + 1) ?: return false
+        synchronized(replanGenerations) { replanGenerations[next.id] = (replanGenerations[next.id] ?: 0) + 1 }
+        install(null)
+        return true
+    }
+
     /**
      * Restores the queue saved by the last session. [resolve] turns song ids into [Song] rows (Room). Nothing is
      * played: the queue is installed paused, and the saved position is applied when playback first starts.
@@ -413,6 +454,7 @@ class EngineControllerImpl(
         if (persistence == null) return
         scope.launch {
             if (!queue.snapshot().isEmpty) return@launch
+            synchronized(replanGenerations) { replanGenerations.clear() }
             val saved = try {
                 persistence.load()
             } catch (t: Throwable) {
@@ -463,7 +505,8 @@ class EngineControllerImpl(
         installJob = scope.launch {
             prepareImmediate(snapshot.current)
             if (forceFresh) coordinator.onQueue(snapshot.context, emptyList(), 0)
-            coordinator.onQueue(snapshot.context, QueueManager.queueItems(effectiveSongs), effectiveIndex)
+            val generations = synchronized(replanGenerations) { HashMap(replanGenerations) }
+            coordinator.onQueue(snapshot.context, QueueManager.queueItems(effectiveSongs, generations), effectiveIndex)
             persist()
         }
         when (playNow) {
@@ -766,6 +809,13 @@ class EngineControllerImpl(
                 ),
             )
         }
+    }
+
+    /** [shaper] applied to [base]; a shaper that fails leaves the prefs unshaped rather than stopping playback. */
+    private fun shapeSafely(base: TransitionPrefs): TransitionPrefs = try {
+        normalize(shaper.shape(base))
+    } catch (t: Throwable) {
+        base
     }
 
     /** The engine format is the device's, never whatever was stored on another device / build. */

@@ -30,6 +30,18 @@ object ActivityResultContracts {
         override fun createIntent(context: Context, input: android.net.Uri?): Intent = Intent()
         override fun parseResult(resultCode: Int, intent: Intent?): android.net.Uri? = null
     }
+
+    /** SAF "open a document"; the input is the accepted MIME types. A cancelled picker yields null. */
+    open class OpenDocument : ActivityResultContract<Array<String>, android.net.Uri?>() {
+        override fun createIntent(context: Context, input: Array<String>): Intent = Intent()
+        override fun parseResult(resultCode: Int, intent: Intent?): android.net.Uri? = null
+    }
+
+    /** SAF "create a document" of [mimeType]; the input is the suggested file name. A cancelled picker yields null. */
+    open class CreateDocument(private val mimeType: String) : ActivityResultContract<String, android.net.Uri?>() {
+        override fun createIntent(context: Context, input: String): Intent = Intent()
+        override fun parseResult(resultCode: Int, intent: Intent?): android.net.Uri? = null
+    }
 }
 
 class ActivityResult(val resultCode: Int, val data: Intent?)

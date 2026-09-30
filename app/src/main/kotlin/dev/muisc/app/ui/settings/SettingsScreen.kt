@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Headphones
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Palette
@@ -54,6 +55,7 @@ import dev.muisc.app.data.prefs.UiPrefs
 import dev.muisc.app.ui.MuiscNavigator
 import dev.muisc.app.ui.components.SectionHeader
 import dev.muisc.app.ui.components.formatDouble
+import dev.muisc.app.ui.dj.DjSectionIndex
 import dev.muisc.app.ui.library.LibraryTopBar
 import dev.muisc.app.ui.viewmodel.AppViewModelFactory
 import dev.muisc.app.ui.viewmodel.SettingsViewModel
@@ -65,6 +67,7 @@ object SettingsSections {
     const val LOOK = "look"
     const val AUDIO = "audio"
     const val TRANSITIONS = "transitions"
+    const val DJ = "dj"
     const val LIBRARY = "library"
     const val ABOUT = "about"
 }
@@ -75,6 +78,7 @@ private val sections = listOf(
     SectionEntry(SettingsSections.LOOK, R.string.settings_look, Icons.Rounded.Palette),
     SectionEntry(SettingsSections.AUDIO, R.string.settings_audio, Icons.Rounded.Tune),
     SectionEntry(SettingsSections.TRANSITIONS, R.string.settings_transitions, Icons.Rounded.SwapHoriz),
+    SectionEntry(SettingsSections.DJ, R.string.settings_dj, Icons.Rounded.Headphones),
     SectionEntry(SettingsSections.LIBRARY, R.string.settings_library, Icons.Rounded.LibraryMusic),
     SectionEntry(SettingsSections.ABOUT, R.string.settings_about, Icons.Rounded.Info),
 )
@@ -109,6 +113,7 @@ fun SettingsScreen(section: String?, navigator: MuiscNavigator) {
                 SettingsSections.LOOK -> item { LookSection(uiPrefs, vm) }
                 SettingsSections.AUDIO -> item { AudioSection(transitionPrefs, vm) }
                 SettingsSections.TRANSITIONS -> item { TransitionsSection(transitionPrefs, uiPrefs, vm) }
+                SettingsSections.DJ -> item { DjSectionIndex(navigator) }
                 SettingsSections.LIBRARY -> item { LibrarySection(uiPrefs, vm) }
                 SettingsSections.ABOUT -> item { AboutSection() }
                 else -> item { AboutSection() }
