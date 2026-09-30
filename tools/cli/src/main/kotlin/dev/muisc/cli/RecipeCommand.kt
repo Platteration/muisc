@@ -329,12 +329,13 @@ class RecipeLanesCommand : RecipeSubcommand("lanes") {
             else -> v
         }
         val samples = DoubleArray(width) { x -> lane.valueAt(total * x / (width - 1)) }
-        val ys = samples.map { y(it) } + y(lane.kind.neutral)
-        val lo = ys.min()
-        val hi = ys.max()
+        // The range covers every point (a short peak can fall between two columns) and the neutral value.
+        val values = samples.toList() + lane.points.map { it.value } + lane.kind.neutral
+        val lo = values.minOf { y(it) }
+        val hi = values.maxOf { y(it) }
         val span = if (hi > lo) hi - lo else 1.0
-        val loLabel = valueText(lane.kind, samples.minOrNull()?.let { if (lane.kind == LaneKind.DB) maxOf(it, PLOT_FLOOR_DB) else it } ?: lo)
-        val hiLabel = valueText(lane.kind, samples.maxOrNull() ?: hi)
+        val loLabel = valueText(lane.kind, values.min().let { if (lane.kind == LaneKind.DB) maxOf(it, PLOT_FLOOR_DB) else it })
+        val hiLabel = valueText(lane.kind, values.max())
         val labelWidth = maxOf(loLabel.length, hiLabel.length)
         val grid = Array(height) { CharArray(width) { ' ' } }
         for (x in 0 until width) {
