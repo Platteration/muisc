@@ -4,6 +4,7 @@ import dev.muisc.analysis.model.OutroType
 import dev.muisc.analysis.model.TrackAnalysis
 import dev.muisc.dsp.stems.Stems
 import dev.muisc.transitions.DefaultPairAnalyzer
+import dev.muisc.transitions.DefaultProgramBuilder
 import dev.muisc.transitions.PairAnalyzer
 import dev.muisc.transitions.PairFeatures
 import dev.muisc.transitions.PlanCandidate
@@ -19,6 +20,7 @@ import dev.muisc.transitions.TrackAudioLoader
 import dev.muisc.transitions.TrackRef
 import dev.muisc.transitions.TransitionGating
 import dev.muisc.transitions.TransitionInput
+import dev.muisc.transitions.TransitionPlan
 import dev.muisc.transitions.TransitionPlanner
 import dev.muisc.transitions.TransitionPrefs
 import dev.muisc.transitions.TransitionRenderer
@@ -46,7 +48,9 @@ import kotlin.math.min
  *  1. [onQueue] resolves analyses for the current and next track (urgent) and the two after them (background),
  *     installs / extends the [PlaybackProgram] on the [player] (bodies from [programBuilder]).
  *  2. Gate ([TransitionGating] plus segue protection and album-flow-in-playlist) → [CoordinatorState.Gated].
- *  3. Plan ([planner]) → [CoordinatorState.Planned].
+ *  3. Plan ([planner]) → [CoordinatorState.Planned]. The current edge tries first the candidates that leave both
+ *     tracks their minimum body, the planner's order kept among them ([orderByRoom]); when none does, the planner's
+ *     order stands.
  *  4. Render when `remainingA ≤ max(90 s, 4 × estimated render time)`; [gate] checks the render; accepted renders
  *     are installed via [EngineCommand.ReplaceTail] while the cursor is `< aExitFrame − 2 s` → [CoordinatorState.Ready].
  *     A rejected or failed render excludes its strategy and moves to the next candidate.
@@ -85,6 +89,9 @@ class TransitionCoordinator(
 
     private val sampleRate: Int get() = player.sampleRate
 
+    /** Minimum-body rule for [orderByRoom]: the installed builder's when it is the default one. */
+    private val room: DefaultProgramBuilder = programBuilder as? DefaultProgramBuilder ?: DefaultProgramBuilder()
+
     // ---- queue model (scope thread only) ----
     private var queue: List<QueueItem> = emptyList()
     private var context = PlaybackContext.QUEUE
@@ -117,6 +124,8 @@ class TransitionCoordinator(
 
     private inner class Edge(val index: Int, val aId: String, val bId: String) {
         var state: CoordinatorState = CoordinatorState.Analysing
+        /** The candidates in the planner's order; [ranked] is the order they are tried in ([orderByRoom]). */
+        var planned: RankedPlans? = null
         var ranked: RankedPlans? = null
         var features: PairFeatures? = null
         var candidatePos = 0
@@ -265,6 +274,7 @@ class TransitionCoordinator(
         e.forceLive?.let { reason -> if (e.installed == null) { installLive(e, reason, null); return } }
         if (e.rendered != null && e.installed == null) { tryInstallRender(e); return }
         if (e.installed is Segment.Rendered) return
+        orderByRoom(e)
         val cand = currentCandidate(e)
         if (cand == null) { installLive(e, "no renderable candidate", null); return }
         val aNow = aNowFrame(e)
@@ -288,6 +298,7 @@ class TransitionCoordinator(
         val f = try { pairAnalyzer.features(a.analysis, b.analysis, prefs) } catch (t: Throwable) { e.state = CoordinatorState.Failed("pair analysis: ${t.message}"); return }
         e.features = f
         val ranked = try { planner.plan(a, b, prefs, seed, previousStrategyId) } catch (t: Throwable) { e.state = CoordinatorState.Failed("planner: ${t.message}"); return }
+        e.planned = ranked
         e.ranked = ranked
         e.candidatePos = 0
         retained[key]?.let { r ->
@@ -327,6 +338,47 @@ class TransitionCoordinator(
     }
 
     private fun allowedByPower(strategyId: String): Boolean = powerMode != PowerMode.SAVER || strategyId in LIVE_CAPABLE
+
+    /**
+     * Room: the current edge tries first the candidates that leave both tracks their minimum body
+     * ([DefaultProgramBuilder.roomOrder]) — A between the transition into it and this one, B between this one and
+     * one of the plans of the transition out of it (planned here if it was not yet; when the track after B is not
+     * analysed yet, as for the first transition of a freshly installed queue, B only has to keep its body on its
+     * own, and a render that is already due starts on that). The planner's own order is
+     * kept among candidates with room, so a track with room to spare plays exactly what the planner ranked first.
+     * Re-evaluated on every step until a render starts, as the transition into A gets installed; after that the
+     * order is fixed and a failed or rejected render falls to the next candidate in it.
+     */
+    private fun orderByRoom(e: Edge) {
+        val planned = e.planned ?: return
+        if (e.renderJob != null) return
+        val aEntry = when (val incoming = edges[e.index - 1]?.installed) {
+            is Segment.Rendered -> incoming.rendered.plan.bEntryFrame
+            is Segment.Live -> incoming.plan.bExitFrame()
+            else -> null
+        }
+        val prefs = prefsProvider()
+        val next = nextPlans(e.index + 1)
+        val ordered = room.roomOrder(planned.candidates, e.a, e.b, context, prefs, aEntry, next)
+        if (ordered == e.ranked?.candidates) return
+        e.ranked = RankedPlans(planned.features, ordered)
+        e.candidatePos = 0
+        val cand = currentCandidate(e)
+        if (cand != null && e.state is CoordinatorState.Planned) e.state = CoordinatorState.Planned(cand.strategy.id, cand.score)
+        if (ordered.first() !== planned.best) {
+            val why = room.room(planned.best.plan, e.a, e.b, context, prefs, aEntry, next)
+            log("edge ${e.index}: room — ${planned.best.strategy.id} ${why.name.lowercase()}; trying ${ordered.first().strategy.id} first")
+        }
+    }
+
+    /** The plans the transition out of queue index [k] can choose from; null when there is none (last track, gated, not analysed yet). */
+    private fun nextPlans(k: Int): List<TransitionPlan>? {
+        if (k + 1 >= queue.size || refs[k] == null || refs[k + 1] == null) return null
+        val next = edges.getOrPut(k) { Edge(k, queue[k].id, queue[k + 1].id) }
+        if (next.ranked == null && !next.isDone) gateAndPlan(next)
+        if (next.isDone) return null
+        return next.planned?.candidates?.map { it.plan }
+    }
 
     /** The candidate the edge is on (skipping excluded, power-restricted and over-long ones), advancing [Edge.candidatePos]. */
     private fun currentCandidate(e: Edge): PlanCandidate? {

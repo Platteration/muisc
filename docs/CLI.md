@@ -78,6 +78,12 @@ Analyses every track, plans each consecutive pair (with the variety penalty), re
 the context, and writes the set plus a per-transition report and the seam map. `--context album` respects album
 order and renders no transitions at all, which is the behaviour the app uses when you play an album.
 
+Every song plays at least one bar of itself (half of itself if it is shorter than two bars) between the transitions
+around it. When the planner's favourite would not leave that (a short song, or a transition that exits before the
+previous one has handed the song over), `mix` plays the best-ranked candidate that does, and says so on a `room:`
+line. A transition that still has to be dropped, because no candidate fits, is reported with `dropped` and that
+pair plays body to body.
+
 ## Comparing and tuning
 
 ```

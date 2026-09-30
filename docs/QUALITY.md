@@ -38,18 +38,19 @@ that both decks are slaved to a `MasterGrid`. `echoOut`, `phraseCut`, `filterSwe
 | # | transition | strategy | verdict | worst metrics |
 |---|---|---|---|---|
 | 1 | t120C → t126Am | `echoOut` | WARN | `levelJumpDb` 5.09, `loudnessSmoothness` 9.50, `tailContainedDb` -41.2 |
-| 2 | t126Am → t140Fs | `phraseCut` | WARN | `loudnessSmoothness` 23.9 |
+| 2 | t126Am → t140Fs | `loopRollRiser` | FAIL | `tailContainedDb` -17.7, `levelJumpDb` 4.40, `loudnessSmoothness` 5.75 |
 | 3 | t140Fs → t63G | `echoOut` | FAIL | `levelJumpDb` 10.64, `loudnessSmoothness` 6.10, `stereoCorrelationMin` -0.35 |
 
-Program output: 6 segments, 5 seams, 1:56.8. `clicks = 0`, `levelJumpDb = 2.66` (PASS), `truePeakDbtp = -0.94`
-(WARN). `muisc check set.wav` over the whole two minutes, with no sources to excuse anything, also reports
-`clicks = 0`.
+Program output: 7 segments, 6 seams, 1:51.6. `clicks = 0`, `levelJumpDb = 2.76` (PASS), `truePeakDbtp = -0.94`
+(WARN). `muisc check set.wav` over the whole set, with no sources to excuse anything, also reports `clicks = 0`.
 
-Transition 2 is planned and rendered but **not installed**: `phraseCut` wants to cut t126Am at 5.6 s while the
-`echoOut` before it hands the track over at 13.9 s, so the program builder drops it and plays that pair
-body-to-body (see "fixed", item 3). The underlying cause is upstream of the transition engine — the analyser puts
-t126Am's `mixOutBeat` at beat 16 of 64, at the start of its DROP section rather than near its outro, and
-`phraseCut` correctly cuts at the first phrase start at or after it.
+Transition 2 is not the planner's favourite. `phraseCut` (#1) wants to cut t126Am at 5.6 s while the `echoOut`
+before it hands the track over at 13.9 s, so the program builder would have to drop it (see "fixed", item 3), and
+the set used to play that pair body-to-body. `mix` now plays the best-ranked candidate that leaves both songs
+their minimum body, `loopRollRiser` (#2), and prints a `room:` line saying so. Its `tailContainedDb` FAIL is its
+own and is not investigated yet (known failures, item 7). The underlying cause of the early cut is upstream of the
+transition engine: the analyser puts t126Am's `mixOutBeat` at beat 16 of 64, at the start of its DROP section
+rather than near its outro, and `phraseCut` correctly cuts at the first phrase start at or after it.
 
 ## Fixed since the last measurement
 
@@ -93,6 +94,14 @@ t126Am's `mixOutBeat` at beat 16 of 64, at the start of its DROP section rather 
    render is dropped — it is the causally later decision, and in the player the incoming transition is already
    installed by the time the next one is planned — and if that is still not enough, the incoming one goes too.
    Regression test: `DefaultProgramBuilderTest.aTrackIsNeverScheduledWithoutRoomToPlay`.
+   Dropping made short songs lose their transitions: a 30 s song between two others could lose one side and
+   played into the next with a hard cut. `mix` and the `TransitionCoordinator` now try first the candidates
+   that leave both songs their minimum body (`DefaultProgramBuilder.roomOrder`, keeping the planner's order
+   among them), so the builder only drops when no candidate fits. On the synthetic short-song sets this kept
+   every transition (fixture set 2/3 → 3/3, a 15 s song between two 3-minute ones 1/2 → 2/2, five short songs
+   2/4 → 4/4); on four 2½–4-minute songs the set is byte-identical. Regression tests:
+   `CliSmokeTest."mix keeps the transitions on both sides of a short track"`,
+   `TransitionCoordinatorTest.aShortMiddleTrackKeepsItsBodyAndBothTransitions`.
 
 4. **Beat alignment on non-beat-domain strategies** (60–85 ms FAIL → metric absent). A metric bug. The lane id
    `masterBeat` was being used for two different things: the grid both decks are locked to, and "A's beats, for
@@ -334,6 +343,9 @@ metrics is to make transition quality measurable while it is tuned.
 
 6. **`stereoCorrelationMin` -0.35 on `echoOut` t140Fs → t63G**, -0.60 to -0.72 on `drumBreakBridge` and
    `brakeStop`. Not investigated.
+
+7. **`tailContainedDb` -17.7 dB on `loopRollRiser` t126Am → t140Fs** (FAIL, threshold -40). Present in the
+   shuffle mix since `mix` stopped dropping that transition (see the mix above). Not investigated.
 
 ## Honest limits
 

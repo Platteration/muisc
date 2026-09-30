@@ -252,6 +252,58 @@ class CliSmokeTest {
         assertContains(text, "rendered")
     }
 
+    /**
+     * t126Am is a 30 s song. The planner's favourite from it into t63G (a 21-bar harmonic blend) leaves it at
+     * 1.8 s, long before the echo-out from t120C has handed it over at 14 s, so the program builder had to drop it
+     * and the set cut hard from t126Am into t63G. The mix now tries the candidates that leave both songs a body.
+     */
+    @Test
+    fun `mix keeps the transitions on both sides of a short track`() {
+        val wav = out("mix/short.wav")
+        val report = out("mix/short.json")
+        val text = run(
+            "mix", songs.a.absolutePath, songs.b.absolutePath, songs.d.absolutePath,
+            "-o", wav.absolutePath, "--report", report.absolutePath,
+        )
+        val json = JSON.parseToJsonElement(report.readText()).jsonObject
+        val segments = json["segments"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("body", "rendered", "body", "rendered", "body"), segments.map { it["kind"]!!.jsonPrimitive.content }, text)
+        for (s in segments.filter { it["kind"]!!.jsonPrimitive.content == "body" }) {
+            // Every song plays at least one bar of itself (t126Am: 1.9 s) between the transitions around it.
+            assertTrue(s["frames"]!!.jsonPrimitive.content.toLong() >= 83_000, "body too short: $s")
+        }
+        assertContains(text, "room:")
+    }
+
+    /**
+     * A leg with no candidate that fits is not handed to the program builder. A transition that starves B would
+     * make the builder drop B's *next* transition first (it drops outgoing before incoming) and then itself, so
+     * both were lost. Here t120C → the 15 s B is pinned to a 12 s crossfade that enters B too late for B to keep a
+     * bar, crossfade is the only strategy allowed, and B → t63G fits B played from its start: that one is kept.
+     */
+    @Test
+    fun `mix drops only the leg that cannot fit, not the one after it`() {
+        val profile = File(root, "profile-collateral").absolutePath
+        val dir = File(root, "short8")
+        run("synth", "--out", dir.absolutePath, "--bpm", "124", "--key", "Am", "--bars", "8", "--intro", "2", "--outro", "2")
+        val b = dir.listFiles()!!.single { it.extension == "wav" }
+        val planned = run("plan", songs.a.absolutePath, b.absolutePath, "--json", "--profile-dir", profile)
+        val plan = JSON.parseToJsonElement(planned.substring(planned.indexOf('{'), planned.lastIndexOf('}') + 1)).jsonObject
+        val others = (plan["candidates"]!!.jsonArray + plan["skipped"]!!.jsonArray).map { it.jsonObject["strategyId"]!!.jsonPrimitive.content }
+            .filter { it != "crossfade" && '+' !in it }.toSet()
+        assertTrue(others.size > 5, "$others")
+        run("pin", "set", songs.a.absolutePath, b.absolutePath, "crossfade", "--set", "fadeSec=12", "--profile-dir", profile)
+
+        val report = out("mix/collateral.json")
+        val text = run(
+            "mix", songs.a.absolutePath, b.absolutePath, songs.d.absolutePath, "-o", out("mix/collateral.wav").absolutePath,
+            "--report", report.absolutePath, "--set-pref", "disabledStrategies=" + others.joinToString(","), "--profile-dir", profile,
+        )
+        val segments = JSON.parseToJsonElement(report.readText()).jsonObject["segments"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("body", "body", "rendered", "body"), segments.map { it["kind"]!!.jsonPrimitive.content }, text)
+        assertContains(text, "1. t120C → ${b.nameWithoutExtension}: crossfade dropped")
+    }
+
     @Test
     fun `mix in the album context plays the album gapless`() {
         val wav = out("mix/album.wav")

@@ -150,4 +150,119 @@ class DefaultProgramBuilderTest {
         }
         assertEquals(1, short.segments.filterIsInstance<Segment.Rendered>().size, "${short.segments}")
     }
+
+    // ---- room -------------------------------------------------------------------------------------------------
+
+    private fun cand(name: String, aExit: Long, bEntry: Long): PlanCandidate {
+        val r = fakeRender(aExit, bEntry)
+        return PlanCandidate(dev.muisc.transitions.strategies.CrossfadeStrategy(), Applicability.of(0.5, name), 0.5, r.plan.copy(strategyId = name))
+    }
+
+    private fun renderOf(c: PlanCandidate): RenderedTransition = fakeRender(c.plan.aExitFrame, c.plan.bEntryFrame)
+
+    /**
+     * A 30 s track between two normal ones. The transition into it hands over at 14 s; the planner's favourite
+     * out of it leaves at 5 s, which [DefaultProgramBuilder.build] can only repair by dropping it. [roomOrder] puts
+     * the candidate that leaves it a body first, and with that one the program keeps both transitions.
+     */
+    @Test
+    fun roomOrderPutsTheCandidateThatKeepsBothTransitionsFirst() {
+        val a = track("a"); val b = track("b", seconds = 30.0); val c = track("c")
+        val intoB = fakeRender(aExit = 50L * sr, bEntry = 14L * sr)
+        val early = cand("early", aExit = 5L * sr, bEntry = 3L * sr)
+        val late = cand("late", aExit = 25L * sr, bEntry = 3L * sr)
+
+        assertEquals(DefaultProgramBuilder.Room.STARVES_A, builder.room(early.plan, b, c, PlaybackContext.PLAYLIST, prefs, intoB.plan.bEntryFrame, null))
+        assertEquals(DefaultProgramBuilder.Room.FITS, builder.room(late.plan, b, c, PlaybackContext.PLAYLIST, prefs, intoB.plan.bEntryFrame, null))
+        val ordered = builder.roomOrder(listOf(early, late), b, c, PlaybackContext.PLAYLIST, prefs, intoB.plan.bEntryFrame, null)
+        assertEquals(listOf("late", "early"), ordered.map { it.plan.strategyId })
+
+        fun program(out: PlanCandidate) = builder.build(listOf(a, b, c), PlaybackContext.PLAYLIST, prefs) { x, _ -> if (x.id == "a") intoB else renderOf(out) }
+        assertEquals(1, program(early).segments.count { it is Segment.Rendered }, "the favourite costs a transition")
+        val kept = program(ordered.first())
+        assertEquals(2, kept.segments.count { it is Segment.Rendered }, "${kept.segments}")
+        for (body in kept.segments.filterIsInstance<Segment.Body>()) assertTrue(body.frames >= builder.minBodyFrames(body.track, PlaybackContext.PLAYLIST, prefs), "$body")
+    }
+
+    @Test
+    fun roomOrderLooksAtTheNextTransitionOutOfB() {
+        val a = track("a"); val b = track("b", seconds = 30.0)
+        val next = listOf(cand("out", aExit = 12L * sr, bEntry = 2L * sr).plan)
+        val deep = cand("deep", aExit = 50L * sr, bEntry = 20L * sr)      // B plays 20..29.5 s alone, but "out" leaves at 12 s
+        val tooDeep = cand("tooDeep", aExit = 50L * sr, bEntry = 29L * sr) // not even a bar of B alone
+        val shallow = cand("shallow", aExit = 50L * sr, bEntry = 4L * sr)
+        fun room(c: PlanCandidate, n: List<TransitionPlan>?) = builder.room(c.plan, a, b, PlaybackContext.PLAYLIST, prefs, null, n)
+        assertEquals(DefaultProgramBuilder.Room.COSTS_NEXT, room(deep, next))
+        assertEquals(DefaultProgramBuilder.Room.FITS, room(deep, null), "B with no transition out of it keeps 20..29.5 s")
+        assertEquals(DefaultProgramBuilder.Room.STARVES_B, room(tooDeep, next))
+        assertEquals(DefaultProgramBuilder.Room.STARVES_B, room(tooDeep, null))
+        assertEquals(DefaultProgramBuilder.Room.FITS, room(shallow, next))
+        val ordered = builder.roomOrder(listOf(tooDeep, deep, shallow), a, b, PlaybackContext.PLAYLIST, prefs, null, next)
+        assertEquals(listOf("shallow", "deep", "tooDeep"), ordered.map { it.plan.strategyId })
+    }
+
+    /** Tracks with room to spare: the planner's order comes back untouched, the same objects in the same order. */
+    @Test
+    fun roomOrderKeepsThePlannersOrderWhenEveryCandidateFits() {
+        val a = track("a"); val b = track("b")
+        val cands = listOf(cand("x", 50L * sr, 5L * sr), cand("y", 40L * sr, 8L * sr), cand("z", 55L * sr, 3L * sr))
+        val ordered = builder.roomOrder(cands, a, b, PlaybackContext.PLAYLIST, prefs, 4L * sr, listOf(cand("n", 45L * sr, 1L).plan))
+        assertEquals(cands.size, ordered.size)
+        for (i in cands.indices) assertTrue(cands[i] === ordered[i], "position $i")
+        // And when nothing fits, nothing is removed and the planner's order stands.
+        val starving = listOf(cand("p", 2L * sr, 5L * sr), cand("q", 3L * sr, 5L * sr))
+        val same = builder.roomOrder(starving, a, b, PlaybackContext.PLAYLIST, prefs, 30L * sr, null)
+        assertEquals(listOf("p", "q"), same.map { it.plan.strategyId })
+    }
+
+    /**
+     * Full-length songs with the real planner: every candidate leaves both songs their body, so the room order is
+     * the planner's ranking, object for object — including the pair `ReplanNextEdgeTest` (app) plays, whose pinned
+     * last-ranked candidate must stay first.
+     */
+    @Test
+    fun theRealPlannersRankingIsUntouchedForFullLengthSongs() {
+        val p = TransitionPrefs()
+        val planner = dev.muisc.transitions.planner.DefaultTransitionPlanner(DefaultStrategyRegistry.default())
+        fun song(bpm: Double, tonic: Int, bars: Int, seed: Int) =
+            dev.muisc.transitions.synthetic.SyntheticTracks.trackRef(dev.muisc.audio.synth.SyntheticSong(bpm = bpm, tonic = tonic, bars = bars, introBars = 8, outroBars = 8, seed = seed)).trackRef
+        val pairs = listOf(song(80.0, 9, 48, 7) to song(80.0, 4, 48, 11), song(124.0, 0, 64, 3) to song(128.0, 7, 64, 5))
+        for ((a, b) in pairs) {
+            val ranked = planner.plan(a, b, p)
+            val next = planner.plan(b, a, p).candidates.map { it.plan }
+            for (c in ranked.candidates) assertEquals(DefaultProgramBuilder.Room.FITS, builder.room(c.plan, a, b, PlaybackContext.PLAYLIST, p, null, null), "${a.id} → ${b.id} ${c.strategy.id}")
+            for (n in listOf(null, next)) {
+                val ordered = builder.roomOrder(ranked.candidates, a, b, PlaybackContext.PLAYLIST, p, null, n)
+                assertTrue(ranked.candidates.indices.all { ranked.candidates[it] === ordered[it] }, "${a.id} → ${b.id}: ${ordered.map { it.strategy.id }}")
+            }
+        }
+    }
+
+    /**
+     * [DefaultProgramBuilder.hasRoom] is the exact test [DefaultProgramBuilder.build] repairs with: for a middle
+     * track entered and left at random frames (its neighbours with room to spare), both transitions survive the
+     * build exactly when [hasRoom] says so. A room rule that disagreed would reorder candidates for nothing, or
+     * pick one the build then drops.
+     */
+    @Test
+    fun hasRoomAgreesWithWhatBuildKeeps() {
+        val rnd = kotlin.random.Random(42)
+        val a = track("a"); val c = track("c")
+        for (seconds in listOf(1.5, 4.0, 12.0, 30.0)) {
+            val b = track("b", seconds = seconds)
+            val total = b.analysis.totalFrames
+            val min = builder.minBodyFrames(b, PlaybackContext.PLAYLIST, prefs)
+            repeat(300) {
+                val entry = rnd.nextLong(0L, total)
+                // Near the boundary half of the time, so the ≥ in the rule is exercised.
+                val exit = if (rnd.nextBoolean()) entry + min + rnd.nextLong(-2L, 3L) else rnd.nextLong(0L, total)
+                if (exit < 1000) return@repeat
+                val rAB = fakeRender(aExit = 50L * sr, bEntry = entry)
+                val rBC = fakeRender(aExit = exit, bEntry = 5L * sr)
+                val program = builder.build(listOf(a, b, c), PlaybackContext.PLAYLIST, prefs) { x, _ -> if (x.id == "a") rAB else rBC }
+                val bothKept = program.segments.count { it is Segment.Rendered } == 2
+                assertEquals(builder.hasRoom(b, PlaybackContext.PLAYLIST, prefs, entry, exit), bothKept, "b ${seconds}s entry $entry exit $exit min $min")
+            }
+        }
+    }
 }

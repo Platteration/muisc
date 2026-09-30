@@ -32,15 +32,18 @@ package dev.muisc.transitions
  * still too short without it — the incoming render alone swallowed the track — the incoming render is dropped
  * too. Each step removes a render, so the repair terminates.
  *
+ * Dropping is the last resort, not the plan: around a short track it would lose the transitions on both sides and
+ * cut hard between songs. So the callers that choose the renders (`muisc mix`, the player's `TransitionCoordinator`)
+ * try first the candidates that leave both tracks their minimum body — [roomOrder], with the same arithmetic as the
+ * repair ([hasRoom]) — and [build] only drops when no candidate fitted.
+ *
  * Analysis frame positions are at `analysis.sampleRate`; they are rescaled to `prefs.sampleRate` when the two
  * differ (all program positions are engine-rate frames). Renders are trusted to be at the engine rate already.
  */
 class DefaultProgramBuilder : ProgramBuilder {
 
     override fun bodySegment(track: TrackRef, context: PlaybackContext, prefs: TransitionPrefs, incoming: RenderedTransition?, outgoing: RenderedTransition?): Segment.Body {
-        val (defaultFrom, defaultTo) = defaultRange(track, context, prefs)
-        val from = (incoming?.plan?.bEntryFrame ?: defaultFrom).coerceAtLeast(0L)
-        val to = (outgoing?.plan?.aExitFrame ?: defaultTo).coerceAtLeast(from)
+        val (from, to) = bodyBounds(track, context, prefs, incoming?.plan?.bEntryFrame, outgoing?.plan?.aExitFrame)
         return Segment.Body(track, from, to)
     }
 
@@ -96,6 +99,68 @@ class DefaultProgramBuilder : ProgramBuilder {
                 repaired = true
             }
         }
+    }
+
+    /**
+     * Whether [track] keeps at least [minBodyFrames] of itself when it is entered at [entryFrame] (the incoming
+     * transition's `bEntryFrame`; null = no incoming transition) and left at [exitFrame] (the outgoing transition's
+     * `aExitFrame`; null = none). The same arithmetic as [bodySegment] and the same test [build] repairs with.
+     */
+    fun hasRoom(track: TrackRef, context: PlaybackContext, prefs: TransitionPrefs, entryFrame: Long?, exitFrame: Long?): Boolean {
+        val (from, to) = bodyBounds(track, context, prefs, entryFrame, exitFrame)
+        return to - from >= minBodyFrames(track, context, prefs)
+    }
+
+    /**
+     * What a [plan] for [a] → [b] leaves the two tracks — see [roomOrder].
+     *
+     * @param aEntryFrame where A's body starts: the `bEntryFrame` of the transition into A (null = none).
+     * @param next the plans B's own outgoing transition can choose from, or null when B has none (it is the last
+     *   track, the next pair is gated, or the next pair is not known yet — then B must keep its minimum body on its
+     *   own).
+     */
+    fun room(plan: TransitionPlan, a: TrackRef, b: TrackRef, context: PlaybackContext, prefs: TransitionPrefs, aEntryFrame: Long?, next: List<TransitionPlan>?): Room {
+        if (!hasRoom(a, context, prefs, aEntryFrame, plan.aExitFrame)) return Room.STARVES_A
+        val bAlone = hasRoom(b, context, prefs, plan.bEntryFrame, null)
+        val bOk = if (next == null) bAlone else next.any { hasRoom(b, context, prefs, plan.bEntryFrame, it.aExitFrame) }
+        return when {
+            bOk -> Room.FITS
+            bAlone -> Room.COSTS_NEXT
+            else -> Room.STARVES_B
+        }
+    }
+
+    /**
+     * [candidates] (best first, as the planner ranked them) in the order to try them so that the chosen transition
+     * is not one that [build] would have to drop: every candidate that [Room.FITS] first, then those that
+     * [Room.COSTS_NEXT], then the rest. The sort is stable, so within each group the planner's order is kept, and a
+     * planner's best that fits stays first — for tracks with room to spare nothing changes. Nothing is removed:
+     * when no candidate fits, the planner's order comes back unchanged and [build] drops as it always did.
+     */
+    fun roomOrder(candidates: List<PlanCandidate>, a: TrackRef, b: TrackRef, context: PlaybackContext, prefs: TransitionPrefs, aEntryFrame: Long?, next: List<TransitionPlan>?): List<PlanCandidate> =
+        candidates.sortedBy { room(it.plan, a, b, context, prefs, aEntryFrame, next).ordinal }
+
+    /** What a candidate leaves the two tracks around it, in the order [roomOrder] tries them. */
+    enum class Room {
+        /** A keeps its minimum body, and so does B: with one of its next transition's plans, or on its own. */
+        FITS,
+        /** A and B keep their minimum bodies, but none of B's next plans would leave B one: B's next transition cannot fit. */
+        COSTS_NEXT,
+        /**
+         * B would not keep its minimum body even without a transition out of it: [build] drops this one, and drops
+         * B's transition out of it first (it tries the outgoing side before the incoming one).
+         */
+        STARVES_B,
+        /** A would not keep its minimum body between the transition into it and this one: [build] drops this one. */
+        STARVES_A,
+    }
+
+    /** Body bounds for an entry and an exit (null = no transition on that side): the arithmetic of [bodySegment]. */
+    private fun bodyBounds(track: TrackRef, context: PlaybackContext, prefs: TransitionPrefs, entryFrame: Long?, exitFrame: Long?): Pair<Long, Long> {
+        val (defaultFrom, defaultTo) = defaultRange(track, context, prefs)
+        val from = (entryFrame ?: defaultFrom).coerceAtLeast(0L)
+        val to = (exitFrame ?: defaultTo).coerceAtLeast(from)
+        return from to to
     }
 
     /** The body bounds a track would have with no transition on either side. */

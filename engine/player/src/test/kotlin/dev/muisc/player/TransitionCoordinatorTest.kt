@@ -5,6 +5,7 @@ import dev.muisc.audio.AudioSourceId
 import dev.muisc.transitions.Applicability
 import dev.muisc.transitions.DefaultProgramBuilder
 import dev.muisc.transitions.FadeLaw
+import dev.muisc.transitions.FrameRange
 import dev.muisc.transitions.PairFeatures
 import dev.muisc.transitions.ParamSpec
 import dev.muisc.transitions.Params
@@ -288,6 +289,146 @@ class TransitionCoordinatorTest {
         advanceUntilIdle()
         assertEquals(CoordinatorState.Gated("Power saver"), coord.state.value[0])
         coord.shutdown()
+    }
+
+    // ------------------------------------------------------------------------------------------------ room
+
+    /** Ranks per pair of track ids, for queues longer than two. */
+    private class PairPlanner(val byPair: Map<Pair<String, String>, List<PlanCandidate>>, val features: PairFeatures) : TransitionPlanner {
+        override fun plan(a: TrackRef, b: TrackRef, prefs: TransitionPrefs, seed: Long, previousStrategyId: String?): RankedPlans =
+            RankedPlans(features, byPair[a.id to b.id] ?: error("no candidates for ${a.id} → ${b.id}"))
+    }
+
+    private class MapAnalyses(tracks: List<SyntheticTrack>) : AnalysisService {
+        private val byId = tracks.associate { it.trackRef.source to it.analysis }
+        override suspend fun analysis(track: AudioSourceId, urgent: Boolean): TrackAnalysis = byId[track] ?: error("no analysis for $track")
+    }
+
+    /** A stub candidate for [from] → [to] leaving [from] at [aExit] and entering [to] at [bEntry] (one-second windows). */
+    private fun stub(id: String, aExit: Long, bEntry: Long, score: Double): PlanCandidate {
+        val p = plan.copy(strategyId = id, aExitFrame = aExit, bEntryFrame = bEntry, aWindow = FrameRange(aExit - sr, aExit + sr), bWindow = FrameRange(bEntry - sr, bEntry))
+        return candidate(StubStrategy(id, p), p, score)
+    }
+
+    /** [rendered]'s audio carrying [c]'s plan, as the fake renderer's result for that candidate. */
+    private fun renderOf(c: PlanCandidate): () -> RenderedTransition = { RenderedTransition(c.plan, rendered.audio, rendered.markers, rendered.report) }
+
+    /**
+     * B is the last track and the planner's favourite enters it so late that B would play less than a bar of
+     * itself: the coordinator used to render and install it anyway (its bodies never pass through the program
+     * builder's repair). The candidate that leaves B its body is rendered first.
+     */
+    @Test
+    fun theCandidateThatLeavesTheIncomingTrackItsBodyIsRenderedFirst() = runTest {
+        val late = stub("stubLate", plan.aExitFrame, b.analysis.trimEndFrame - sr / 4, 0.9)
+        val planner = FakePlanner(listOf(late, candidate(strategy, plan, 0.4)), features)
+        val renderer = FakeRenderer(mapOf("stubLate" to renderOf(late), "crossfade" to { rendered }))
+        val coord = coordinator(planner, renderer, FakeLiveFactory(), this)
+
+        coord.onQueue(PlaybackContext.QUEUE, items(a, b), 0)
+        advanceUntilIdle()
+
+        assertEquals(listOf("crossfade"), renderer.calls, coord.transitionLog.toString())
+        assertEquals(CoordinatorState.Ready("crossfade"), coord.state.value[0])
+        val bBody = player.commands.snapshot().filterIsInstance<EngineCommand.ReplaceTail>().last().segments.filterIsInstance<Segment.Body>().last()
+        assertTrue(bBody.frames >= DefaultProgramBuilder().minBodyFrames(b.trackRef, PlaybackContext.QUEUE, prefs), "$bBody")
+        assertTrue(coord.transitionLog.any { it.contains("room") && it.contains("stubLate") }, coord.transitionLog.toString())
+        coord.shutdown()
+    }
+
+    /**
+     * A short middle track: the favourite out of B leaves it before the transition into it has even handed it over.
+     * The coordinator used to find that candidate's deadline long gone and play a live transition at once, so B
+     * was heard for about a second. The candidate that leaves B a body is rendered instead, and B keeps it.
+     */
+    @Test
+    fun aShortMiddleTrackKeepsItsBodyAndBothTransitions() = runTest {
+        val c = PlayerFixtures.track(PlayerFixtures.song(128.0, 2, bars = 12, seed = 9), "C")
+        val player3 = ProgramPlayer(sr, 2, limits, PlayerFixtures.streams(a, b, c), prefs, realtime = false)
+        try {
+            val bEntry = plan.bEntryFrame
+            val early = stub("stubEarly", bEntry - sr, c.analysis.trimStartFrame + sr, 0.9) // leaves B before it was entered
+            val roomy = stub("stubRoomy", b.analysis.trimEndFrame - 2L * sr, c.analysis.trimStartFrame + sr, 0.5)
+            val planner = PairPlanner(mapOf(("A" to "B") to listOf(candidate(strategy, plan, 0.8)), ("B" to "C") to listOf(early, roomy)), features)
+            val renderer = FakeRenderer(mapOf("crossfade" to { rendered }, "stubEarly" to renderOf(early), "stubRoomy" to renderOf(roomy)))
+            val live = FakeLiveFactory()
+            val coord = TransitionCoordinator(
+                planner = planner, liveFactory = live, renderer = renderer, programBuilder = DefaultProgramBuilder(),
+                player = player3, analyses = MapAnalyses(listOf(a, b, c)), gate = RenderGate.DEFAULT, limits = limits, clock = clock,
+                scope = this, prefsProvider = { prefs }, seed = SEED,
+            )
+            coord.onQueue(PlaybackContext.QUEUE, items(a, b, c), 0)
+            advanceUntilIdle()
+            assertEquals(CoordinatorState.Ready("crossfade"), coord.state.value[0])
+
+            // Play A and the crossfade until B has taken over, telling the coordinator as the host does.
+            var guard = 0
+            while (player3.position.nowPlaying?.id != "B" && guard++ < 10_000) {
+                player3.render(block, limits.blockFrames)
+                for (ev in player3.events.drain()) coord.onPlayerEvent(ev)
+                advanceUntilIdle()
+            }
+            assertEquals("B", player3.position.nowPlaying?.id)
+            advanceUntilIdle()
+
+            assertEquals(CoordinatorState.Ready("stubRoomy"), coord.state.value[1], coord.transitionLog.toString())
+            assertEquals(listOf("crossfade", "stubRoomy"), renderer.calls)
+            assertTrue(live.requests.isEmpty(), "no live fallback: ${coord.transitionLog}")
+            val segs = player3.commands.snapshot().filterIsInstance<EngineCommand.ReplaceTail>().last().segments
+            val bBody = segs.filterIsInstance<Segment.Body>().first { it.track.id == "B" }
+            assertEquals(bEntry, bBody.fromFrame)
+            assertEquals(roomy.plan.aExitFrame, bBody.toFrame)
+            assertTrue(bBody.frames >= DefaultProgramBuilder().minBodyFrames(b.trackRef, PlaybackContext.QUEUE, prefs), "$bBody")
+            coord.shutdown()
+        } finally {
+            player3.close()
+        }
+    }
+
+    /**
+     * Looking one transition ahead: the favourite into the short B enters it so late that no plan out of B leaves B
+     * a bar, so that next transition would be lost. The candidate that keeps both is the one rendered.
+     *
+     * The look-ahead needs the analysis of the track after B. On a queue that has just been installed it is not
+     * there yet when the first evaluation runs, so this uses a long first track, whose render is not due until the
+     * look-ahead is known (as it is for every transition after the first, whose analyses were resolved one track
+     * earlier).
+     */
+    @Test
+    fun theTransitionIntoAShortTrackLeavesRoomForTheOneOutOfIt() = runTest {
+        val long = PlayerFixtures.track(PlayerFixtures.song(120.0, 0, bars = 64, seed = 11), "L")
+        val c = PlayerFixtures.track(PlayerFixtures.song(128.0, 2, bars = 12, seed = 9), "C")
+        val player3 = ProgramPlayer(sr, 2, limits, PlayerFixtures.streams(long, b, c), prefs, realtime = false)
+        try {
+            val aExit = long.analysis.trimEndFrame - 4L * sr
+            val out = stub("stubOut", b.analysis.trimStartFrame + 6L * sr, c.analysis.trimStartFrame + sr, 0.9)
+            val deep = stub("stubDeep", aExit, b.analysis.trimStartFrame + 10L * sr, 0.9) // B keeps a body alone, but not with stubOut
+            val shallow = stub("stubShallow", aExit, b.analysis.trimStartFrame + 2L * sr, 0.5)
+            val planner = PairPlanner(mapOf(("L" to "B") to listOf(deep, shallow), ("B" to "C") to listOf(out)), features)
+            val renderer = FakeRenderer(mapOf("stubDeep" to renderOf(deep), "stubShallow" to renderOf(shallow)))
+            val coord = TransitionCoordinator(
+                planner = planner, liveFactory = FakeLiveFactory(), renderer = renderer, programBuilder = DefaultProgramBuilder(),
+                player = player3, analyses = MapAnalyses(listOf(long, b, c)), gate = RenderGate.DEFAULT, limits = limits, clock = clock,
+                scope = this, prefsProvider = { prefs }, seed = SEED,
+            )
+            coord.onQueue(PlaybackContext.QUEUE, items(long, b, c), 0)
+            advanceUntilIdle()
+            assertTrue(renderer.calls.isEmpty(), "more than 90 s left: nothing is rendered yet")
+            assertEquals(CoordinatorState.Planned("stubShallow", 0.5), coord.state.value[0], coord.transitionLog.toString())
+
+            // Half a minute before the exit the render is due.
+            player3.submit(EngineCommand.Seek(aExit - 30L * sr))
+            player3.render(block, limits.blockFrames)
+            for (ev in player3.events.drain()) coord.onPlayerEvent(ev)
+            advanceUntilIdle()
+
+            assertEquals(listOf("stubShallow"), renderer.calls, coord.transitionLog.toString())
+            assertEquals(CoordinatorState.Ready("stubShallow"), coord.state.value[0])
+            assertTrue(coord.transitionLog.any { it.contains("room") && it.contains("stubDeep") }, coord.transitionLog.toString())
+            coord.shutdown()
+        } finally {
+            player3.close()
+        }
     }
 
     private fun gainDb(t: SyntheticTrack): Float = dev.muisc.transitions.core.DeckGain.of(t.analysis, prefs)
