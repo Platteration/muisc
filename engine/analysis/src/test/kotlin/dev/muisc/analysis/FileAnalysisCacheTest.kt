@@ -159,6 +159,29 @@ class FileAnalysisCacheTest {
     }
 
     @Test
+    fun analysesCachedByTheVersion2Analyzer_areRecomputed() {
+        // Version 2 is the analyzer before the metrical-level check, the seeded grid fit and the peak-hold transient
+        // envelope: its tempo and grid can be an octave off or wander through a drumless intro, so an entry it left
+        // in the cache must be a miss and the track analysed again (docs: re-analysis on first use after updating).
+        val dir = tempDir()
+        val song = SyntheticSong(bpm = 124.0, tonic = 5, bars = 8, introBars = 1, outroBars = 1, sampleRate = 44100, seed = 12)
+        val wav = File(dir, "old.wav")
+        WavIo.write(wav, song.render())
+        val cache = FileAnalysisCache(File(dir, "cache"))
+        val counting = CountingAnalyzer(DefaultTrackAnalyzer())
+        val service = AnalysisService(counting, cache, JavaSoundDecoder(), engineSampleRate = 44100, channels = 2)
+        val source = AudioSourceId(wav.path)
+        val stale = sampleAnalysis(service.fingerprintOf(source)).copy(version = 2, analysisMillis = 777)
+        cache.put(stale)
+        assertNotNull(cache.get(stale.fingerprint, 44100, 2), "the stale entry is on disk")
+        assertNull(service.cachedAnalysisOf(source), "a version-2 entry must not be served")
+        val fresh = service.analysisOf(source)
+        assertEquals(1, counting.calls, "the track is analysed again")
+        assertEquals(TrackAnalysis.CURRENT_VERSION, fresh.version)
+        assertTrue(fresh.analysisMillis != 777L)
+    }
+
+    @Test
     fun memoryCache_behavesLikeFileCacheForTheInterface() {
         val cache = MemoryAnalysisCache()
         val a = sampleAnalysis("m")

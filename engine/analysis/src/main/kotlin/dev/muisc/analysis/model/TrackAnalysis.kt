@@ -157,8 +157,11 @@ data class TrackAnalysis(
     override fun hashCode(): Int = (sourceId.hashCode() * 31 + fingerprint.hashCode()) * 31 + version
 
     companion object {
-        /** Bump whenever the analysis output changes in a way that invalidates caches. */
-        const val CURRENT_VERSION = 2
+        /**
+         * Bump whenever the analysis output changes in a way that invalidates caches. 3: the metrical-level check
+         * (tempo halving), the seeded weighted grid fit and the peak-hold transient envelope moved tempos and grids.
+         */
+        const val CURRENT_VERSION = 3
         val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = false }
         fun fromJson(s: String): TrackAnalysis = json.decodeFromString(s)
     }

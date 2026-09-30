@@ -1,5 +1,6 @@
 package dev.muisc.analysis.rhythm
 
+import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.log10
 import kotlin.math.max
@@ -90,11 +91,14 @@ class BeatTracker(
  * Sub-frame re-alignment of beat / onset times onto waveform transients.
  *
  * The spectral flux of a percussive event peaks while the STFT window slides onto the transient, so ODF frame
- * times lead the waveform onset by up to half a window. This helper computes a log-power envelope in blocks of
- * [blockSize] samples (1.45 ms at 22.05 kHz) and, for a candidate time, finds the block with the largest rise
- * over [riseBlocks] blocks inside `[t - searchBeforeSec, t + searchAfterSec]`. When that rise exceeds
- * [minRiseDb] the transient's start is returned (the block before the rise peak), otherwise the candidate time
- * is returned unchanged (sustained material has no transient to align to).
+ * times lead the waveform onset by up to half a window. This helper computes a log envelope in blocks of
+ * [blockSize] samples (1.45 ms at 22.05 kHz) — the peak absolute sample value of the last [envelopeBlocks] blocks
+ * (11.6 ms by default), in dB: the power of a single block of a kick or bass note rises and falls with every half
+ * cycle of the note, which gives rises as large as the onset's anywhere in its first cycles, while a peak held over
+ * a cycle rises only when something louder starts — and, for a candidate time, finds the block with the largest
+ * rise over [riseBlocks] blocks inside `[t - searchBeforeSec, t + searchAfterSec]`. When that rise exceeds
+ * [minRiseDb] the transient's start is returned (the block before the rise peak), otherwise the candidate time is
+ * returned unchanged (sustained material has no transient to align to).
  */
 class TransientAligner(
     mono: FloatArray,
@@ -104,18 +108,26 @@ class TransientAligner(
     val searchBeforeSec: Double = 0.03,
     val searchAfterSec: Double = 0.02,
     val minRiseDb: Double = 4.0,
+    val envelopeBlocks: Int = 8,
 ) {
+    init { require(envelopeBlocks >= 1) }
     private val blocks = (mono.size + blockSize - 1) / blockSize
     private val logPower = FloatArray(blocks)
     val blockSeconds: Double = blockSize.toDouble() / sampleRate
 
     init {
+        val peak = FloatArray(blocks)
         for (b in 0 until blocks) {
-            var acc = 0.0
+            var m = 0f
             val s = b * blockSize
             val e = min(mono.size, s + blockSize)
-            for (i in s until e) acc += mono[i].toDouble() * mono[i]
-            logPower[b] = (10.0 * log10(acc / blockSize + 1e-10)).toFloat()
+            for (i in s until e) { val v = abs(mono[i]); if (v > m) m = v }
+            peak[b] = m
+        }
+        for (b in 0 until blocks) {
+            var m = 0f
+            for (j in max(0, b - envelopeBlocks + 1)..b) if (peak[j] > m) m = peak[j]
+            logPower[b] = (20.0 * log10(m + 1e-5)).toFloat()
         }
     }
 

@@ -183,6 +183,45 @@ class RhythmComponentsTest {
         assertEquals(listOf(2, 4), TempoEstimator.localMaxima(floatArrayOf(0f, 1f, 0f, 0.9f, 0f), 1, 5))
     }
 
+    // ---- MetricalLevel ---------------------------------------------------------------------------------------
+
+    /** Features with the given raw broadband / low-band flux at 64 tracked beats 40 frames apart (even / odd beats). */
+    private fun parityFeatures(broadEven: Float, broadOdd: Float, lowEven: Float, lowOdd: Float): Pair<IntArray, OnsetFeatures> {
+        val beats = IntArray(64) { 20 + it * 40 }
+        val n = beats.last() + 40
+        val raw = FloatArray(n); val low = FloatArray(n)
+        for ((i, b) in beats.withIndex()) { raw[b] = if (i % 2 == 0) broadEven else broadOdd; low[b] = if (i % 2 == 0) lowEven else lowOdd }
+        return beats to OnsetFeatures(ar, 256, raw, low, raw, low, Array(n) { FloatArray(12) }, FloatArray(n))
+    }
+
+    @Test
+    fun metricalLevel_halvesOnlyWhenTheLowBandAndTheBroadbandFluxBothAlternate() {
+        val m = MetricalLevel()
+        // A slow song tracked at its eighths: kick + hat on the beats, a hat alone on the off-beats.
+        val (beats, slow) = parityFeatures(broadEven = 1f, broadOdd = 0.4f, lowEven = 0.5f, lowOdd = 0f)
+        val c = m.check(beats, slow, bpm = 132.0)
+        assertEquals(0.0, c.lowBalance, 1e-9); assertEquals(0.4, c.broadBalance, 1e-6)
+        assertTrue(c.halve)
+        // ... but not below minBpm
+        assertFalse(m.check(beats, slow, bpm = 79.0).halve)
+        // A backbeat: the low band alternates (kick / snare), the broadband flux does not.
+        val (b2, backbeat) = parityFeatures(broadEven = 1f, broadOdd = 0.9f, lowEven = 0.5f, lowOdd = 0.05f)
+        val c2 = m.check(b2, backbeat, bpm = 120.0)
+        assertTrue(c2.lowBalance < m.maxLowBalance && c2.broadBalance >= m.maxBroadBalance, "low ${c2.lowBalance} broad ${c2.broadBalance}")
+        assertFalse(c2.halve)
+        // Every tracked beat alike (four on the floor at the right level).
+        assertFalse(m.check(b2, parityFeatures(1f, 0.95f, 0.5f, 0.45f).second, bpm = 128.0).halve)
+        // No low band at all (share of flux below OnsetFeatures.LOW_BAND_ZERO_FRACTION): no evidence, no change.
+        val (b3, noLow) = parityFeatures(broadEven = 1f, broadOdd = 0.4f, lowEven = 0.03f, lowOdd = 0f)
+        assertEquals(0.0, m.check(b3, noLow, bpm = 132.0).lowWeight)
+        assertFalse(m.check(b3, noLow, bpm = 132.0).halve)
+        // A parity slip halfway (the tracker skipped one eighth, so even and odd swap) does not balance the parities
+        // out: the balance is taken per block of 8 beats (summed over the whole track it would read 1).
+        val slipped = IntArray(64) { if (it < 32) 20 + it * 40 else 20 + (it + 1) * 40 }
+        assertEquals(0.0, m.parityBalance(slipped, slow.rawLowOdf), 1e-9)
+        assertEquals(1.0, m.parityBalance(IntArray(4) { it * 40 }, slow.rawLowOdf), 1e-9) // fewer than 8 beats: no evidence
+    }
+
     // ---- BeatTracker -----------------------------------------------------------------------------------------
 
     @Test
@@ -230,6 +269,60 @@ class RhythmComponentsTest {
         assertTrue(seq.contentEquals(doubleArrayOf(0.5, 1.0, 1.5)))
     }
 
+    /**
+     * A sustained saw-ish bass (the tail of the previous bass note under every beat) plus, at 20 known times, a kick
+     * (a sine sweeping 155 → 45 Hz, like [dev.muisc.audio.synth.SyntheticSong]'s), optionally with a hi-hat noise
+     * burst on the same beat as in those songs.
+     */
+    private fun kicksOverBass(bassHz: Double, hat: Boolean): Pair<FloatArray, DoubleArray> {
+        val x = FloatArray(ar * 8)
+        val rnd = kotlin.random.Random(3)
+        val w = 2 * Math.PI * bassHz / ar
+        for (i in x.indices) { var s = 0.0; for (h in 1..4) s += kotlin.math.sin(h * w * i) / h; x[i] = (0.2 * s).toFloat() }
+        val kicks = DoubleArray(20) { 0.3 + it * 0.3717 + rnd.nextDouble() * 0.01 }
+        for (k in kicks) {
+            val start = Math.round(k * ar).toInt()
+            var phase = 0.0
+            for (i in 0 until (0.35 * ar).toInt()) {
+                val t = i.toDouble() / ar
+                phase += 2 * Math.PI * (45.0 + 110.0 * kotlin.math.exp(-t * 28.0)) / ar
+                if (start + i < x.size) x[start + i] += (0.75 * kotlin.math.exp(-t * 9.0) * kotlin.math.sin(phase)).toFloat()
+            }
+            if (hat) {
+                var hp = 0f
+                for (i in 0 until (0.1 * ar).toInt()) {
+                    val white = rnd.nextFloat() * 2f - 1f
+                    val out = white - hp; hp += 0.6f * (white - hp)
+                    if (start + i < x.size) x[start + i] += 0.2f * kotlin.math.exp(-i / (0.02 * ar)).toFloat() * out
+                }
+            }
+        }
+        return x to kicks
+    }
+
+    @Test
+    fun transientAligner_findsKickOnsetsOverASustainedBassLine() {
+        // Measured on single 1.45 ms blocks, the power of these low notes rises and falls with every half cycle, so
+        // the largest block-to-block rise can sit anywhere in the bass before the beat or in the kick's first cycles
+        // (the old envelope put beats up to 38 ms early). A candidate 8 ms early, as an ODF peak would be:
+        for (bass in doubleArrayOf(55.0, 65.0, 82.0)) {
+            // kick + hat, as on every beat of the synthetic songs: the aligned time is the beat's start
+            val (x, kicks) = kicksOverBass(bass, hat = true)
+            val a = TransientAligner(x, ar)
+            for (k in kicks) {
+                val err = a.align(k - 0.008) - k
+                assertTrue(abs(err) <= 0.002, "kick + hat over a $bass Hz bass at ${k * 1000} ms: aligned ${"%.1f".format(err * 1000)} ms off")
+            }
+            // a bare sine kick: never moved further from the beat than the candidate already was
+            val (y, bare) = kicksOverBass(bass, hat = false)
+            val b = TransientAligner(y, ar)
+            for (k in bare) {
+                val err = b.align(k - 0.008) - k
+                assertTrue(abs(err) <= 0.008 + 1e-9, "bare kick over a $bass Hz bass at ${k * 1000} ms: aligned ${"%.1f".format(err * 1000)} ms off")
+            }
+        }
+    }
+
     // ---- GridFitter ------------------------------------------------------------------------------------------
 
     @Test
@@ -251,9 +344,13 @@ class RhythmComponentsTest {
         assertTrue(fit.beatSupport > 0.9f, "support ${fit.beatSupport}")
         assertEquals(kotlin.math.sqrt(fit.beatSupport * 0.8), fit.confidence.toDouble(), 1e-5)
 
-        // drifting tempo → FLEX with the tracked beats kept
+        // drifting tempo → FLEX with the tracked beats kept. The onsets are where the drifting beats are (the fitter
+        // weighs each beat by the onset under it, and tracked beats follow the onsets); beats drifting away from
+        // onsets that lie on a line are the lead-in case of gridFitter_extrapolatesTheConfidentSectionThroughAWanderingLeadIn.
         val drift = DoubleArray(n) { 0.3 + it * period + 0.00002 * it * it }
-        val fit2 = GridFitter().fit(drift, odf, hop, 0.8f, 60.0)
+        val driftOdf = FloatArray((60.0 / hop).toInt())
+        for (t in drift) driftOdf[(t / hop).roundToInt()] = 1f
+        val fit2 = GridFitter().fit(drift, driftOdf, hop, 0.8f, 60.0)
         assertEquals(GridKind.FLEX, fit2.kind)
         assertEquals(n, fit2.beatCount)
         for (i in 0 until n) assertTrue(abs(fit2.beatTimesSec[i] - drift[i]) < 0.001)
@@ -262,6 +359,26 @@ class RhythmComponentsTest {
         // fewer than two beats
         val one = GridFitter().fit(doubleArrayOf(1.0), odf, hop, 0.8f, 60.0)
         assertEquals(1, one.beatCount); assertEquals(0f, one.confidence)
+    }
+
+    @Test
+    fun gridFitter_extrapolatesTheConfidentSectionThroughAWanderingLeadIn() {
+        // A drumless intro: 24 beats (6 bars at 100 BPM) whose only onsets are the chord changes on the downbeats,
+        // then 40 beats of drums with an onset on every beat. The tracker's intro beats wandered off the grid by up
+        // to ±150 ms and lost one beat (23 tracked for 24); the drum section is tracked exactly.
+        val hop = 256.0 / ar
+        val period = 0.6
+        val first = 0.25
+        val odf = FloatArray((42.0 / hop).toInt())
+        for (k in 0 until 64) if (k >= 24 || k % 4 == 0) odf[((first + k * period) / hop).roundToInt()] = if (k >= 24) 1f else 0.8f
+        val intro = DoubleArray(23) { first + it * (24 * period / 23) + 0.15 * kotlin.math.sin(it * 0.7) }
+        val body = DoubleArray(40) { first + (24 + it) * period + (if (it % 2 == 0) 0.001 else -0.001) }
+        val fit = GridFitter().fit(intro + body, odf, hop, tempoConfidence = 0.9f, endSec = 42.0)
+        assertEquals(GridKind.RIGID, fit.kind, "residual ${fit.residualMs} ms, inliers ${fit.inlierFraction}")
+        assertEquals(100.0, fit.bpm, 0.05)
+        // the grid is the drum section's line, extended back through the intro to the first tracked beat
+        assertEquals(first, fit.beatTimesSec[0], 0.002)
+        for ((k, t) in fit.beatTimesSec.withIndex()) assertEquals(first + k * period, t, 0.002, "beat $k")
     }
 
     @Test

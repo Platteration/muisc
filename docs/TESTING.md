@@ -184,10 +184,10 @@ on each and prints:
 
 ```
 analysis bench: 12 synthetic songs, seed 1
-  tempo within 1 %         11/12 (91.7 %)
-  octave errors            1/12 (8.3 %)
-  beat F-measure (±70 ms)  mean 0.896, min 0.392; F ≥ 0.9 in 9/12 (75.0 %)
-  downbeat phase           10/12 (83.3 %)
+  tempo within 1 %         12/12 (100.0 %)
+  octave errors            0/12 (0.0 %)
+  beat F-measure (±70 ms)  mean 1.000, min 1.000; F ≥ 0.9 in 12/12 (100.0 %)
+  downbeat phase           12/12 (100.0 %)
   key exact                12/12 (100.0 %)
   ...
 ```
@@ -213,8 +213,10 @@ improves; if a change lowers it, that is a regression to explain, not a number t
 
 **What it cannot tell you.** How the analyzer does on real recordings. Synthetic songs have exact grids, clean
 spectra and textbook chord progressions; they flatter beat tracking and key detection. The bench catches
-regressions and shows the known weak spots (slow tempos read as double time, long drumless intros); use
-`muisc eval`'s analysis section for your library.
+regressions and shows the known weak spots: over seeds 1, 2, 3 and 7 at 48 songs each, one song above 180 BPM
+read at half its tempo (182.5 → 91.3) and one song with no full-drum bars at all (8 bars of intro, 4 of outro) whose
+tempo is not found. Slow songs read at double time and wandering grids through long drumless intros, the weak
+spots before analysis version 3, no longer occur there. Use `muisc eval`'s analysis section for your library.
 
 ## 5. The Lab's blind test
 

@@ -245,6 +245,38 @@ class TempoEstimator(
         return TempoResult(TempoEstimate(bpm, confidence, alternates), refined, tg)
     }
 
+    /**
+     * The same estimate one metrical level slower: half the tempo, twice the period (used when [MetricalLevel]
+     * finds that the tracked level is twice the beat). The confidence is kept (it measures the prominence of the
+     * octave family over unrelated peaks, which does not depend on the level chosen); the half / double alternates
+     * are re-scored against the harmonic sum at the new period, so the old tempo becomes the double alternate; the
+     * other alternates are kept. The tempogram is unchanged: its local periods stay at the old level, so callers
+     * that need the local period curve double it.
+     */
+    fun halved(result: TempoResult): TempoResult {
+        if (result.periodFrames <= 0.0 || result.bpm <= 0.0) return result
+        val h = result.tempogram.globalScore
+        fun near(lag: Double): Float {
+            val i = lag.roundToInt()
+            var m = 0f
+            for (j in max(1, i - 1)..min(h.size, i + 1)) if (h[j - 1] > m) m = h[j - 1]
+            return m
+        }
+        val lag = result.periodFrames * 2
+        val bpm = result.bpm / 2
+        val h1 = near(lag)
+        fun rel(l: Double): Float = if (h1 > 0f) (near(l) / h1).coerceIn(0f, 1f) else 0f
+        val alternates = ArrayList<TempoCandidate>()
+        alternates.add(TempoCandidate(bpm / 2, rel(lag * 2)))
+        alternates.add(TempoCandidate(result.bpm, rel(result.periodFrames)))
+        for (c in result.estimate.alternates) {
+            val r = c.bpm / result.bpm
+            if (abs(r - 0.5) < 0.05 || abs(r - 2.0) < 0.1) continue // the old half / double alternates
+            alternates.add(c)
+        }
+        return TempoResult(result.estimate.copy(bpm = bpm, alternates = alternates), lag, result.tempogram)
+    }
+
     /** Prior weight of a tempo: log-Gaussian around [priorBpm] with [priorSigmaOctaves]. */
     fun priorWeight(bpm: Double): Float {
         val z = log2(bpm / priorBpm) / priorSigmaOctaves

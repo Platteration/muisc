@@ -202,4 +202,93 @@ class RhythmAnalyzerTest {
         // beat index → frame must be strictly increasing and interpolation sane
         for (i in 1 until r.grid.beatCount) assertTrue(r.grid.beatFrames[i] > r.grid.beatFrames[i - 1])
     }
+
+    /** Worst distance (s) from a true beat to the grid's nearest beat, the grid extrapolated before its first beat. */
+    private fun worstBeatError(grid: BeatGrid, truth: DoubleArray): Double = truth.maxOf { t ->
+        val k = Math.round(grid.beatAtFrame(Math.round(t * sr))).toDouble()
+        abs(grid.frameOfBeat(k).toDouble() / sr - t)
+    }
+
+    @Test
+    fun slowSongsWithEighthNoteHats_areReadAtTheirTempoNotAtDoubleTime() {
+        // Kick and bass on every beat, hi-hats on the eighths: at 61–66 BPM the eighth-note pulse (122–132 BPM) is as
+        // periodic as the beat and inside the preferred range, and the analyzer used to read these songs at double
+        // time (`muisc bench analysis`, seed 1: 60.8 → 123.0, 66.4 → 132.2 twice).
+        for ((i, bpm) in doubleArrayOf(61.0, 66.4).withIndex()) {
+            val song = SyntheticSong(bpm = bpm, bars = 12, introBars = 0, outroBars = 0, seed = 21 + i, tonic = 3 + i, sampleRate = sr)
+            val r = RhythmAnalyzer().analyze(song.render())
+            assertEquals(bpm, r.tempo.bpm, bpm * 0.01, "song $bpm: tempo (alternates ${r.tempo.alternates})")
+            assertEquals(bpm, r.grid.bpm, bpm * 0.01, "song $bpm: grid tempo")
+            assertEquals(GridKind.RIGID, r.grid.kind, "song $bpm: grid kind (residual ${r.gridResidualMs} ms)")
+            assertTrue(worstBeatError(r.grid, song.beatTimes()) <= 0.025, "song $bpm: worst beat error ${worstBeatError(r.grid, song.beatTimes())} s")
+            // the double-time reading stays available as an alternate
+            assertTrue(r.tempo.alternates.any { abs(it.bpm - 2 * bpm) < 0.02 * bpm }, "song $bpm: alternates ${r.tempo.alternates}")
+        }
+    }
+
+    @Test
+    fun backbeatWithEighthNoteHats_keepsItsTempo() {
+        // Kick on 1 and 3, snare on 2 and 4, hi-hats on the eighths, bass on 1 and 3: the low band alternates beat to
+        // beat just as a slow song's tracked eighths do, but the snare is as strong a broadband event as the kick, so
+        // the metrical-level check must not halve it (120 BPM, not 60).
+        val bpm = 120.0
+        val beat = 60.0 / bpm
+        val x = FloatArray(Math.round(40.0 * sr).toInt())
+        val rnd = kotlin.random.Random(9)
+        var k = 0
+        while (k * beat < 39.5) {
+            val start = Math.round(k * beat * sr).toInt()
+            if (k % 2 == 0) {
+                var phase = 0.0
+                for (i in 0 until (0.35 * sr).toInt()) {
+                    val t = i.toDouble() / sr
+                    phase += 2 * Math.PI * (45.0 + 110.0 * kotlin.math.exp(-t * 28.0)) / sr
+                    val bass = 0.2 * kotlin.math.exp(-t * 4.0) * kotlin.math.sin(2 * Math.PI * 55.0 * t)
+                    if (start + i < x.size) x[start + i] += (0.8 * kotlin.math.exp(-t * 9.0) * kotlin.math.sin(phase) + bass).toFloat()
+                }
+            } else {
+                // a clap-like snare: high-passed noise, no body in the low band
+                var hp = 0f
+                for (i in 0 until (0.18 * sr).toInt()) {
+                    val white = rnd.nextFloat() * 2f - 1f
+                    val out = white - hp; hp += 0.6f * (white - hp)
+                    if (start + i < x.size) x[start + i] += 0.6f * kotlin.math.exp(-i * 22.0 / sr).toFloat() * out
+                }
+            }
+            for (h in 0 until 2) {
+                val hs = Math.round((k * beat + h * beat / 2) * sr).toInt()
+                var hp = 0f
+                for (i in 0 until (0.1 * sr).toInt()) {
+                    val white = rnd.nextFloat() * 2f - 1f
+                    val out = white - hp; hp += 0.6f * (white - hp)
+                    if (hs + i < x.size) x[hs + i] += 0.2f * kotlin.math.exp(-i / (0.02 * sr)).toFloat() * out
+                }
+            }
+            k++
+        }
+        val r = RhythmAnalyzer().analyze(AudioBuffer.mono(sr, x))
+        assertEquals(bpm, r.tempo.bpm, bpm * 0.01, "backbeat tempo (alternates ${r.tempo.alternates})")
+        assertEquals(bpm, r.grid.bpm, bpm * 0.01, "backbeat grid tempo")
+    }
+
+    @Test
+    fun longDrumlessIntro_theGridIsTheDrumSectionExtendedBackThroughTheIntro() {
+        // Eight bars of pad only (one chord change per bar, nothing on the other beats) before the drums. The tracked
+        // beats wander through such an intro, and the analyzer used to hand them on as a FLEX grid (`muisc bench
+        // analysis`, seed 1: 76.8 BPM i8 had beat F 0.59, 86.6 BPM i8 0.59). The grid must be the drum section's,
+        // extended back through the intro, with the intro's downbeats on the chord changes.
+        for ((i, bpm) in doubleArrayOf(76.8, 88.0).withIndex()) {
+            val song = SyntheticSong(bpm = bpm, bars = 14, introBars = 8, outroBars = 0, seed = 31 + i, tonic = 7 + i, sampleRate = sr)
+            val r = RhythmAnalyzer().analyze(song.render())
+            val g = r.grid
+            assertEquals(GridKind.RIGID, g.kind, "song $bpm: grid kind (residual ${r.gridResidualMs} ms)")
+            assertEquals(bpm, r.tempo.bpm, bpm * 0.005, "song $bpm: tempo")
+            val worst = worstBeatError(g, song.beatTimes())
+            assertTrue(worst <= 0.025, "song $bpm: worst beat error ${worst * 1000} ms (intro included)")
+            for (d in song.downbeatTimes()) {
+                val b = Math.round(g.beatAtFrame(Math.round(d * sr))).toInt()
+                assertTrue(g.isDownbeat(b), "song $bpm: the downbeat at $d s is beat $b, not a grid downbeat (phase ${g.downbeatPhase})")
+            }
+        }
+    }
 }

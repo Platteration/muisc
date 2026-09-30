@@ -77,6 +77,24 @@ class AnalysisBenchTest {
     }
 
     @Test
+    fun `the slow song and the drumless intros of the fixed set are analysed at their tempo and on their grid`() {
+        // #7 (66.4 BPM, eighth-note hi-hats) used to be read at 132 BPM; #0 (76.8 BPM) and #1 (164.9 BPM) open with
+        // eight bars of pad only and used to get beat F 0.59 and 0.84 with the wrong downbeats in the intro.
+        val report = AnalysisBench.report(scores, SEED, showAll = true)
+        val slow = scores[7]
+        assertTrue(slow.case.song.bpm in 66.0..67.0 && slow.case.song.introBars == 4, "fixed set changed: ${slow.case.name}")
+        assertTrue(slow.tempoOk && !slow.octaveError, "#7 tempo ${slow.estBpm} for ${slow.case.trueBpm}\n$report")
+        assertTrue(slow.fMeasure >= 0.99 && slow.phaseOk, "#7 beat F ${slow.fMeasure}, downbeats ${slow.downbeatAccuracy}\n$report")
+        for (i in 0..1) {
+            val intro = scores[i]
+            assertEquals(8, intro.case.song.introBars, "fixed set changed: ${intro.case.name}")
+            assertTrue(intro.tempoOk, "#$i tempo ${intro.estBpm} for ${intro.case.trueBpm}\n$report")
+            assertTrue(intro.fMeasure >= 0.99, "#$i beat F ${intro.fMeasure} (intro beats included)\n$report")
+            assertTrue(intro.phaseOk && intro.downbeatAccuracy >= 0.99, "#$i downbeats ${intro.downbeatAccuracy}\n$report")
+        }
+    }
+
+    @Test
     fun `muisc bench analysis prints the summary and the case table`() {
         val out = runBench(tmp, "analysis", "--songs", "2", "--seed", "4", "--all")
         assertContains(out, "analysis bench: 2 synthetic songs, seed 4")
@@ -88,15 +106,17 @@ class AnalysisBenchTest {
     }
 }
 
-// Floors measured on the fixed set (seed 1, 12 songs) on 2026-09-30, on the analyzer at commit 596a577, and written
-// down as measured (the mean F-measure rounded down to two decimals: measured 0.896). Measured, per song:
-// tempo 11/12 (#7, 66 BPM, is read as 132: an octave error), beat F >= 0.9 in 9/12 (#0 and #1 have 8-bar pad-only
-// intros; #7 is the octave error), downbeat phase 10/12 (#0, #5), key 12/12 exact, trim 12/12 within 50 ms (max 8.6).
-private const val FLOOR_TEMPO_OK = 11
-private const val CEILING_OCTAVE_ERRORS = 1
-private const val FLOOR_BEAT_F_OK = 9
-private const val FLOOR_MEAN_F = 0.89
-private const val FLOOR_PHASE_OK = 10
+// Floors measured on the fixed set (seed 1, 12 songs) on 2026-09-30, on the analyzer with the metrical-level check,
+// the seeded weighted grid fit and the peak-hold transient envelope (analysis version 3), and written down as
+// measured (the mean F-measure rounded down to two decimals: measured exactly 1.0). Measured, per song: tempo 12/12,
+// beat F = 1.0 in 12/12, downbeat phase 12/12, key 12/12 exact, trim 12/12 within 50 ms (max 8.6). The previous
+// floors (analyzer at commit 596a577): tempo 11/12 (#7, 66 BPM, read as 132), 1 octave error, beat F >= 0.9 in
+// 9/12 (#0 and #1 have 8-bar pad-only intros; #7), mean F 0.896 (floor 0.89), downbeat phase 10/12 (#0, #5).
+private const val FLOOR_TEMPO_OK = 12
+private const val CEILING_OCTAVE_ERRORS = 0
+private const val FLOOR_BEAT_F_OK = 12
+private const val FLOOR_MEAN_F = 1.00
+private const val FLOOR_PHASE_OK = 12
 private const val FLOOR_KEY_EXACT = 12
 private const val FLOOR_KEY_EXACT_OR_RELATIVE = 12
 private const val FLOOR_TRIM_OK = 12

@@ -22,7 +22,10 @@ class GridFit(
     val beatSupport: Float,
     /** 0..1 combined grid confidence (geometric mean of beat support and tempo confidence). */
     val confidence: Float,
-    /** Fraction of tracked beats that lie on the fitted line (robust fit inliers). */
+    /**
+     * Share of the tracked beats' weight (onset support) that lies on the fitted line (robust fit inliers), among
+     * the beats that are not in an off-line run the line explains as well as they do (see [GridFitter]).
+     */
     val inlierFraction: Float = 1f,
 ) {
     val beatCount: Int get() = beatTimesSec.size
@@ -31,12 +34,20 @@ class GridFit(
 /**
  * Turns tracked beats into a RIGID or FLEX grid.
  *
- * A least-squares line `t_k = offset + period * k` is fitted through the tracked beat times, robustly: after a
- * plain fit, beats whose residual exceeds 3 × 1.4826 × MAD (at least [minInlierMs]) are dropped and the line
- * re-fitted, [robustIterations] times. When the RMS residual of the inliers is below [rigidResidualMs] and at
- * least [minInlierFraction] of the beats are inliers, the tempo is constant for practical purposes and a RIGID
- * grid is produced:
- * the fitted line, extended from the first tracked beat to [GridFitter.fit]'s `endSec`. Otherwise the grid is
+ * A weighted least-squares line `t_k = offset + period * k` is fitted through the tracked beat times, robustly.
+ * Each beat weighs its onset support (the ODF maximum within ±[supportRadiusFrames] frames, plus [weightFloor]),
+ * so beats with nothing under them — the beats the tracker placed through a drumless intro or a breakdown — barely
+ * count. The first fit uses only the seed: the heaviest run of at least [seedMinBeats] consecutive beats with
+ * support ≥ [seedMinSupport] (all beats when there is no such run), so a long intro whose tracked beats wandered
+ * cannot tilt the line the confident section defines. Then every beat whose residual exceeds 3 × 1.4826 × the
+ * weighted MAD of all residuals (at least [minInlierMs]) is dropped, the others kept, and the line re-fitted,
+ * [robustIterations] times. When the weighted RMS residual of the inliers is below [rigidResidualMs] and at least
+ * [minInlierFraction] of the weight is on the line, the tempo is constant for practical purposes and a RIGID grid
+ * is produced. For that fraction, a run of consecutive off-line beats does not count when the line's own beats
+ * over the same span sit on at least as much onset strength as the tracked beats (the intro's few onsets, its
+ * chord changes, fall on the extrapolated grid while the tracked beats wandered or slipped phase); a run whose
+ * tracked beats sit on stronger onsets than the line's positions (a real tempo change) does. The RIGID grid is the
+ * fitted line from its beat nearest the first tracked beat to [GridFitter.fit]'s `endSec`. Otherwise the grid is
  * FLEX: the tracked beats with a 3-point median smoothing, where each interior beat is replaced by the median of
  * itself and the two positions predicted from its neighbours with the local median inter-beat interval (this
  * removes single-beat outliers without smoothing genuine tempo drift).
@@ -53,8 +64,16 @@ class GridFitter(
     val robustIterations: Int = 3,
     /** Inlier cut is never tighter than this (ms), so frame-quantised beats are not rejected. */
     val minInlierMs: Double = 6.0,
-    /** A RIGID grid needs at least this fraction of the tracked beats on the line. */
+    /** A RIGID grid needs at least this fraction of the tracked beats' weight on the line. */
     val minInlierFraction: Double = 0.7,
+    /** Weight every tracked beat gets on top of its onset support, so a track without onsets still fits. */
+    val weightFloor: Double = 0.05,
+    /** Onset support of a beat is the ODF maximum within this many frames of it. */
+    val supportRadiusFrames: Int = 2,
+    /** The seed of the robust fit is a run of beats whose onset support is at least this (unit-scale ODF). */
+    val seedMinSupport: Double = 0.25,
+    /** ... and at least this long (beats); shorter runs leave the first fit to all beats. */
+    val seedMinBeats: Int = 8,
 ) {
     /**
      * @param beatTimesSec tracked beats (strictly increasing, seconds from the ODF origin)
@@ -65,45 +84,60 @@ class GridFitter(
         val n = beatTimesSec.size
         if (n < 2) return GridFit(GridKind.FLEX, 0.0, beatTimesSec.copyOf(), 0.0, 0.0, if (n == 1) beatTimesSec[0] else 0.0, 0f, 0f)
 
-        // Robust least squares t = offset + period * k: plain fit, then re-fit on the inliers (|residual| within
-        // max(3 * 1.4826 * MAD, minInlierMs)) a few times so ambient intro / outro beats without transients do
-        // not decide the grid kind or skew the tempo.
-        val inlier = BooleanArray(n) { true }
+        // Robust weighted least squares t = offset + period * k: each beat weighs its onset support (the ODF at the
+        // beat, plus a small floor), so beats with nothing under them — a drumless intro, a breakdown — cannot
+        // decide the line. The first fit uses only the seed (the heaviest run of well-supported beats, when there is
+        // one), so a long intro whose tracked beats wander cannot tilt the line the confident section defines; then
+        // re-fit on the inliers (|residual| within max(3 * 1.4826 * weighted MAD, minInlierMs), over all beats) a few
+        // times so ambient intro / outro beats without transients do not decide the grid kind or skew the tempo.
+        val weight = DoubleArray(n) { weightFloor + supportAt(odf, beatTimesSec[it], hopSec) }
+        var totalWeight = 0.0
+        for (v in weight) totalWeight += v
+        val seed = seedRun(weight)
+        val inlier = BooleanArray(n) { seed == null || it in seed }
         var period = 0.0
         var offset = 0.0
         var residualMs = 0.0
-        var inliers = n
+        var inlierWeight = totalWeight
         val res = DoubleArray(n)
         for (iter in 0..robustIterations) {
-            var sk = 0.0; var st = 0.0; var skk = 0.0; var skt = 0.0; var cnt = 0
+            var sw = 0.0; var sk = 0.0; var st = 0.0; var skk = 0.0; var skt = 0.0; var cnt = 0
             for (k in 0 until n) {
                 if (!inlier[k]) continue
-                val t = beatTimesSec[k]; sk += k; st += t; skk += k.toDouble() * k; skt += k * t; cnt++
+                val w = weight[k]; val t = beatTimesSec[k]
+                sw += w; sk += w * k; st += w * t; skk += w * k.toDouble() * k; skt += w * k * t; cnt++
             }
-            val denom = cnt * skk - sk * sk
+            val denom = sw * skk - sk * sk
             if (cnt < 2 || denom <= 0.0) break
-            period = (cnt * skt - sk * st) / denom
-            offset = (st - period * sk) / cnt
+            period = (sw * skt - sk * st) / denom
+            offset = (st - period * sk) / sw
             var ss = 0.0
-            for (k in 0 until n) { res[k] = beatTimesSec[k] - (offset + period * k); if (inlier[k]) ss += res[k] * res[k] }
-            residualMs = sqrt(ss / cnt) * 1000.0
-            inliers = cnt
+            for (k in 0 until n) { res[k] = beatTimesSec[k] - (offset + period * k); if (inlier[k]) ss += weight[k] * res[k] * res[k] }
+            residualMs = sqrt(ss / sw) * 1000.0
+            inlierWeight = sw
             if (iter == robustIterations) break
-            val absRes = DoubleArray(n) { abs(res[it]) }
-            absRes.sort()
-            val mad = absRes[n / 2]
+            val mad = weightedMedianAbs(res, weight)
             val cut = max(3.0 * 1.4826 * mad, minInlierMs / 1000.0)
             var changed = false
             for (k in 0 until n) { val v = abs(res[k]) <= cut; if (v != inlier[k]) changed = true; inlier[k] = v }
             if (!changed) break
         }
-        val inlierFraction = inliers.toDouble() / n
+        // Off-line runs the line explains as well as the tracked beats do (the grid's own positions there sit on at
+        // least as much onset strength — a drumless intro whose tracked beats wandered or slipped phase while its few
+        // onsets fall on the extrapolated grid) do not count against the line; runs whose tracked beats sit on
+        // stronger onsets than the grid's positions do (a real tempo change).
+        val explained = if (period > 0.0) explainedOutlierWeight(beatTimesSec, weight, inlier, odf, hopSec, period, offset) else 0.0
+        val judged = totalWeight - explained
+        val inlierFraction = if (judged > 0.0) inlierWeight / judged else 0.0
 
         val rigid = residualMs < rigidResidualMs && inlierFraction >= minInlierFraction && period > 0
         val times: DoubleArray
         val bpm: Double
         if (rigid) {
-            // The line may extrapolate the first tracked beat slightly before the region start; never emit negative times.
+            // Start at the line's beat nearest the first tracked beat (the tracked beats before the confident part
+            // may have slipped a beat, so index 0 of the line need not be the first tracked beat); the line may
+            // extrapolate slightly before the region start; never emit negative times.
+            offset += Math.round((beatTimesSec[0] - offset) / period) * period
             while (offset < 0.0) offset += period
             val count = if (endSec <= offset) 1 else (floor((endSec - offset) / period).toInt() + 1)
             times = DoubleArray(count) { offset + it * period }
@@ -141,6 +175,75 @@ class GridFitter(
         if (count == 0) return 0f
         val ratio = atBeats / count / meanAll
         return ((ratio - 1.0) / (fullSupportRatio - 1.0)).coerceIn(0.0, 1.0).toFloat()
+    }
+
+    /**
+     * Total weight of the runs of consecutive outlier beats whose onset support is no better than the line's: for a
+     * run of outliers `a..b`, the mean support at the tracked beats is compared with the mean support at the line's
+     * beats `offset + j * period` inside `[t_a - period / 2, t_b + period / 2]`.
+     */
+    private fun explainedOutlierWeight(
+        t: DoubleArray, weight: DoubleArray, inlier: BooleanArray, odf: FloatArray, hopSec: Double, period: Double, offset: Double,
+    ): Double {
+        var explained = 0.0
+        var a = 0
+        while (a < t.size) {
+            if (inlier[a]) { a++; continue }
+            var b = a
+            while (b + 1 < t.size && !inlier[b + 1]) b++
+            var tracked = 0.0
+            var runWeight = 0.0
+            for (k in a..b) { tracked += weight[k] - weightFloor; runWeight += weight[k] }
+            tracked /= (b - a + 1)
+            val j0 = kotlin.math.ceil((t[a] - period / 2 - offset) / period).toLong()
+            val j1 = floor((t[b] + period / 2 - offset) / period).toLong()
+            var line = 0.0
+            var count = 0
+            for (j in j0..j1) { line += supportAt(odf, offset + j * period, hopSec); count++ }
+            if (count > 0 && line / count >= tracked) explained += runWeight
+            a = b + 1
+        }
+        return explained
+    }
+
+    /**
+     * The heaviest run of at least [seedMinBeats] consecutive beats whose onset support is at least [seedMinSupport]
+     * (by total weight), or null when there is none.
+     */
+    private fun seedRun(weight: DoubleArray): IntRange? {
+        var best: IntRange? = null
+        var bestWeight = 0.0
+        var start = -1
+        var acc = 0.0
+        for (k in 0..weight.size) {
+            val strong = k < weight.size && weight[k] - weightFloor >= seedMinSupport
+            if (strong) {
+                if (start < 0) { start = k; acc = 0.0 }
+                acc += weight[k]
+            } else if (start >= 0) {
+                if (k - start >= seedMinBeats && acc > bestWeight) { best = start until k; bestWeight = acc }
+                start = -1
+            }
+        }
+        return best
+    }
+
+    /** ODF at [timeSec]: the maximum over ±[supportRadiusFrames] frames (0 outside the ODF). */
+    private fun supportAt(odf: FloatArray, timeSec: Double, hopSec: Double): Double {
+        val f = Math.round(timeSec / hopSec).toInt()
+        var m = 0f
+        for (u in max(0, f - supportRadiusFrames)..min(odf.size - 1, f + supportRadiusFrames)) if (odf[u] > m) m = odf[u]
+        return m.toDouble()
+    }
+
+    /** Weighted median of `|x|` with weights [w]. */
+    private fun weightedMedianAbs(x: DoubleArray, w: DoubleArray): Double {
+        val idx = x.indices.sortedBy { abs(x[it]) }
+        var total = 0.0
+        for (v in w) total += v
+        var acc = 0.0
+        for (i in idx) { acc += w[i]; if (acc >= total / 2) return abs(x[i]) }
+        return if (idx.isEmpty()) 0.0 else abs(x[idx.last()])
     }
 
     /** 3-point median smoothing of beat positions (see class doc). Keeps the first and last beats. */

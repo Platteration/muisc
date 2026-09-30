@@ -36,7 +36,8 @@ class RhythmResult(
 /**
  * Facade of the rhythm pipeline: mono downmix → resample to [ANALYSIS_SAMPLE_RATE] ([Resampler]) →
  * [OnsetDetector] → [TempoEstimator] → [BeatTracker] on [OnsetFeatures.trackingOdf] (broadband flux with the
- * kick / bass band emphasised), transient re-alignment → [GridFitter] → [DownbeatEstimator] → [BeatGrid] in
+ * kick / bass band emphasised) → [MetricalLevel] check (halve the tempo and track again when the tracked beats
+ * alternate beat / off-beat) → transient re-alignment → [GridFitter] → [DownbeatEstimator] → [BeatGrid] in
  * engine-rate frames.
  *
  * Only `[trimStartFrame, trimEndFrame)` is analysed; all outputs are expressed in whole-buffer coordinates.
@@ -54,6 +55,8 @@ class RhythmAnalyzer(
     val alignTransients: Boolean = true,
     /** Minimum trimmed duration (seconds) for tempo / beat estimation. */
     val minDurationSec: Double = 3.0,
+    /** Halves a tempo whose tracked beats alternate beat / off-beat (see [MetricalLevel]). */
+    val metricalLevel: MetricalLevel = MetricalLevel(),
 ) {
     init { require(onsetDetector.sampleRate == ANALYSIS_SAMPLE_RATE) { "OnsetDetector must run at $ANALYSIS_SAMPLE_RATE Hz" } }
 
@@ -80,15 +83,21 @@ class RhythmAnalyzer(
         if (regionSec < minDurationSec) return RhythmResult(TempoEstimate(0.0, 0f), BeatGrid.EMPTY, onsets, odfOut, hopSec)
 
         // 3. tempo
-        val tempo = tempoEstimator.estimate(features)
+        var tempo = tempoEstimator.estimate(features)
         if (tempo.periodFrames <= 0.0 || tempo.bpm <= 0.0) {
             return RhythmResult(tempo.estimate, BeatGrid.EMPTY, onsets, odfOut, hopSec)
         }
 
-        // 4. beats
+        // 4. beats, then the metrical-level check on them: a tracked level that alternates beat / off-beat is
+        //    twice the tempo, so the tempo is halved and the beats are tracked again at the doubled period
         val periods = tempo.tempogram.periodCurve(features.frames, tempo.periodFrames)
         val trackingOdf = features.trackingOdf()
-        val beatFrames = beatTracker.track(trackingOdf, periods)
+        var beatFrames = beatTracker.track(trackingOdf, periods)
+        if (metricalLevel.check(beatFrames, features, tempo.bpm).halve) {
+            tempo = tempoEstimator.halved(tempo)
+            for (i in periods.indices) periods[i] *= 2.0
+            beatFrames = beatTracker.track(trackingOdf, periods)
+        }
         if (beatFrames.size < 2) return RhythmResult(tempo.estimate, BeatGrid.EMPTY, onsets, odfOut, hopSec)
         var beatTimes = DoubleArray(beatFrames.size) { features.frameTime(beatFrames[it]) }
         if (alignTransients) beatTimes = TransientAligner(mono, ANALYSIS_SAMPLE_RATE).alignAll(beatTimes)
