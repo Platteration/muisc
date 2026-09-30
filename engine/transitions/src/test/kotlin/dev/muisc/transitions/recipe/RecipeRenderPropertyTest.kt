@@ -13,6 +13,12 @@ import kotlin.test.assertTrue
  * Twenty seeded random recipes — random lanes, curves, EQ, filters, echo, reverb and freeze on both decks, but
  * respecting the boundary rule — in all three tempo modes: every one renders with finite samples, no clicks, a clean
  * splice and no boundary warning.
+ *
+ * The level lanes stay at or below unity (EQ bands still boost up to +6 dB and filters resonate up to Q 4). Level
+ * boosts are legal in a recipe, but with this seed a deck at x1.17 through a +2 dB low shelf and a Q 2.3 high-pass
+ * reached +5 dBTP, and the true-peak limiter's 6 dB of gain reduction on a kick left a hat onset that the click
+ * detector flags (ratio 8.05 against a threshold of 8); at x0.7 the same recipe is clean. That is the shared
+ * limiter at work on a grossly over-driven mix, not the recipe renderer, so it is kept out of this property.
  */
 class RecipeRenderPropertyTest {
     private class Gen(seed: Long) {

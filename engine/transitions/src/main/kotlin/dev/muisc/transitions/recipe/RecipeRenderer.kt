@@ -53,10 +53,13 @@ import kotlin.math.pow
  * ## Automation
  * Lanes are evaluated every [BLOCK] output frames from the frame's timeline bar (`match` / `glide`: through the
  * master grid, so a bar is a bar at whatever tempo; `none`: A's bar length), converted to their working domain
- * (linear gain for level and dB lanes, ln Hz for cutoffs), smoothed by a centred [SMOOTH_TAPS]-block moving average
- * (so even a `step` becomes a ~30 ms ramp) and interpolated linearly per sample. The ramp is that long on purpose:
- * a gain that falls to silence within a few milliseconds of a transient cuts the transient short, which is
- * audible (and measurable) as a tick even though the waveform has no discontinuity.
+ * (linear gain for level and dB lanes, ln Hz for cutoffs), smoothed by a [SMOOTH_TAPS]-block moving average over
+ * the ~30 ms that FOLLOW each block, and interpolated linearly per sample. So every change is at least a ~30 ms
+ * ramp (a `step` included), and the ramp ENDS on the point's bar: a lane reaches each point's value exactly where
+ * the recipe puts it. Both halves matter on beat-aligned moves. A gain that falls to silence within a few
+ * milliseconds *after* a transient cuts the transient short, which is audible (and measurable) as a tick although
+ * the waveform has no discontinuity; a cut that is complete when the downbeat's transient arrives removes it
+ * cleanly, and a deck that jumps up on a downbeat is at full level when its transient starts.
  *
  * ## Freeze
  * While a reverb's freeze lane is >= 0.5 the reverb is frozen ([FdnReverb.freeze]). Its input is faded out over the
@@ -605,14 +608,14 @@ internal class BlockLane(private val v: DoubleArray) {
     companion object {
         /**
          * Samples [lane] at the block boundaries of `[0, frames]` ([barAt] maps a local frame to a timeline bar),
-         * transforms into [domain] and smooths with a centred [RecipeRenderer.SMOOTH_TAPS]-block moving average.
+         * transforms into [domain] and smooths each block with the mean of itself and the
+         * [RecipeRenderer.SMOOTH_TAPS]` - 1` blocks after it (a look-ahead average: a step ends on its own block).
          */
         fun sample(lane: ResolvedLane, frames: Int, barAt: (Long) -> Double, domain: Domain): BlockLane {
             val b = RecipeRenderer.BLOCK
             val nb = frames / b + 2
-            val h = RecipeRenderer.SMOOTH_TAPS / 2
-            val raw = DoubleArray(nb + 2 * h) { j -> domain.transform(lane.valueAt(barAt((j - h).toLong() * b))) }
-            val taps = 2 * h + 1
+            val taps = RecipeRenderer.SMOOTH_TAPS
+            val raw = DoubleArray(nb + taps - 1) { j -> domain.transform(lane.valueAt(barAt(j.toLong() * b))) }
             return BlockLane(DoubleArray(nb) { k -> var s = 0.0; for (j in k until k + taps) s += raw[j]; s / taps })
         }
     }
