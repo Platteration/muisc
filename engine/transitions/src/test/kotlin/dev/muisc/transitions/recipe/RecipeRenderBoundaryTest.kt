@@ -104,6 +104,60 @@ class RecipeRenderBoundaryTest {
         assertTrue(checked > 500, "enough samples compared ($checked)")
     }
 
+    /** A deck A still audible when the overlap ends (here at bar 3.6, mid-beat) leaves with a 10 ms linear fade, not a cut. */
+    @Test
+    fun aStillAudibleAtTheEndOfTheOverlapIsDeclicked() {
+        val pair = RecipeRenderTestSupport.far
+        val rec = recipe(
+            "a-hangs-on", RecipeTempo.NONE,
+            DeckRecipe(level = listOf(pt(0, 1), pt(1, 0.5))),
+            DeckRecipe(level = listOf(pt(1, 0, RecipeCurve.EQUAL_POWER), pt(3, 1))),
+            length = 3.6, hold = 1,
+        )
+        val aOnly = render(rec, pair, silenceB = true)
+        assertContract("a hangs on", aOnly, boundaryClean = false)
+        assertTrue(aOnly.out.report.warnings.any { it.startsWith("boundary rule: A's level is 0.5 at the end of the overlap (bar 3.6)") }, aOnly.out.report.warnings.toString())
+        val g = dev.muisc.transitions.core.Splice.GUARD_FRAMES
+        val aEnd = g + Math.round(3.6 * 2.0 * RecipeRenderTestSupport.SR).toInt()
+        val fade = RecipeRenderer.DECLICK_FRAMES
+        val dry = aOnly.input.aAudio[0]
+        val aOff = aOnly.plan.aExitOffset
+        var checked = 0
+        for (i in 0 until fade) {
+            val frame = aEnd - fade + i
+            val d = dry[aOff + frame]
+            if (abs(d) < 0.01f) continue
+            assertEquals(0.5 * (fade - 1 - i) / fade, (aOnly.out.audio[0][frame] / d).toDouble(), 1e-3, "A's declick at frame $i of $fade")
+            checked++
+        }
+        assertTrue(checked > 100, "enough samples compared ($checked)")
+        assertTrue((aEnd until aEnd + 4096).all { aOnly.out.audio[0][it] == 0f }, "nothing of A after the overlap")
+    }
+
+    /** A reverb left frozen to the very end is released over the last bar, and nothing of it reaches the post-roll. */
+    @Test
+    fun effectTailsAreReleasedBeforeThePostRoll() {
+        val pair = RecipeRenderTestSupport.near
+        val rec = recipe(
+            "frozen-forever", RecipeTempo.NONE,
+            DeckRecipe(
+                level = listOf(pt(2.75, 1), pt(3, 0)),
+                reverb = ReverbRecipe(send = listOf(pt(2, 0), pt(2.5, 1), pt(3, 1), pt(3.25, 0)), freeze = listOf(pt(3.3, 0, RecipeCurve.STEP), pt(3.35, 1))),
+            ),
+            DeckRecipe(level = listOf(pt(3, 0, RecipeCurve.EQUAL_POWER), pt(4, 1))),
+            length = 4, hold = 2,
+        )
+        val aOnly = render(rec, pair, silenceB = true)
+        assertContract("frozen forever", aOnly, boundaryClean = false)
+        assertTrue(aOnly.out.report.warnings.any { it.startsWith("boundary rule: a.reverb.freeze is still on in the last bar") }, aOnly.out.report.warnings.toString())
+        val audio = aOnly.out.audio
+        val end = aOnly.plan.expectedOutputFrames - dev.muisc.transitions.core.Splice.GUARD_FRAMES
+        val frozen = T.rmsDb(audio, RecipeRenderTestSupport.outFrame(aOnly, pair, rec, 4.0), RecipeRenderTestSupport.outFrame(aOnly, pair, rec, 4.5))
+        val lastMs = T.rmsDb(audio, end - 441L, end.toLong())
+        assertTrue(frozen > -40.0 && lastMs < frozen - 40.0, "the frozen tail (${"%.1f".format(frozen)} dBFS) is released to ${"%.1f".format(lastMs)} dBFS by the post-roll")
+        assertTrue((end until audio.frames).all { audio[0][it] == 0f && audio[1][it] == 0f }, "nothing of A's reverb in the post-roll")
+    }
+
     @Test
     fun cleanRecipeHasNoWarnings() {
         val rec = recipe("polite", RecipeTempo.MATCH, DeckRecipe(level = RecipeRenderTestSupport.fadeOutA()), DeckRecipe(level = fadeInB()))

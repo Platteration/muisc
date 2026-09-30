@@ -143,4 +143,56 @@ class RecipeRenderEffectsTest {
         val released = rms(frozen, 7.75, 8.0)
         assertTrue(released < late - 6.0, "after the freeze is released the tail decays (${fmt(late)} -> ${fmt(released)} dBFS)")
     }
+
+    /**
+     * The hard case for a freeze: it engages while the send is wide open and A (pre-fader) is still feeding it, and it
+     * is released on a loud, dark (500 Hz damping) tail at double return level, with nothing else playing. Neither
+     * moment may click.
+     */
+    @Test
+    fun freezeEngagesAndReleasesWithoutClicks() {
+        val pair = RecipeRenderTestSupport.near
+        val rec = recipe(
+            "hard-freeze", RecipeTempo.NONE,
+            DeckRecipe(
+                level = listOf(pt(4, 1), pt(4.25, 0)),
+                reverb = ReverbRecipe(
+                    send = listOf(pt(3, 0), pt(3.25, 1), pt(5, 1), pt(5.25, 0)),
+                    freeze = listOf(pt(4.3, 0, RecipeCurve.STEP), pt(4.3, 1), pt(6, 1, RecipeCurve.STEP), pt(6, 0)),
+                    decaySec = e(3), dampHz = e(500), returnLevel = e(2),
+                ),
+            ),
+            DeckRecipe(level = listOf(pt(7, 0, RecipeCurve.EQUAL_POWER), pt(8, 1))),
+            length = 8, hold = 1,
+        )
+        val aOnly = render(rec, pair, silenceB = true)
+        assertContract("hard freeze", aOnly)
+        fun rms(from: Double, to: Double) = T.rmsDb(aOnly.out.audio, outFrame(aOnly, pair, rec, from), outFrame(aOnly, pair, rec, to))
+        assertTrue(rms(5.0, 5.9) > -30.0, "the frozen tail is loud (${fmt(rms(5.0, 5.9))} dBFS)")
+        assertContract("hard freeze, both decks", render(rec, pair))
+    }
+
+    /**
+     * Found by the random-recipe property test (seed 1, recipe 10; values rounded to 4 decimals): B's reverb, fed
+     * pre-fader while B's fader is still down, is frozen from bar 1.34 and released at bar 2.89 while almost nothing
+     * else plays. Un-freezing an FdnReverb in place restarts its damping filters from the state they had when the
+     * freeze began, and that step comes out of the delay lines as clicks; the renderer instead lets the frozen reverb
+     * fade at its RT60 and starts a fresh one for the send.
+     */
+    @Test
+    fun freezeReleasedOnAQuietMixDoesNotClick() {
+        val rec = RecipeFormat.decode(
+            """
+            {"id": "quiet-release", "name": "quiet release", "timing": {"lengthBars": 7, "tempo": "glide"},
+            "a": {"level": [{"at": 0, "v": 1, "curve": "sCurve"}, {"at": 3.875, "v": 0.8741, "curve": "sCurve"}, {"at": 5.75, "v": 0}], "resonance": 2.4672,
+              "echo": {"send": [{"at": 0, "v": 0, "curve": "equalPower"}, {"at": 1.9375, "v": 0.2673, "curve": "equalPower"}, {"at": 2.0625, "v": 0.9216}, {"at": 2.6403, "v": 0}], "beats": 0.5, "feedback": 0.848, "dampHz": 1019.1204, "returnLevel": 0.9366},
+              "reverb": {"send": [{"at": 0, "v": 0, "curve": "sCurve"}, {"at": 3.625, "v": 0.0885, "curve": "step"}, {"at": 5.0321, "v": 0}], "decaySec": 1.4107, "dampHz": 3942.875, "returnLevel": 0.4182}},
+            "b": {"level": [{"at": 0, "v": 0}, {"at": 2.25, "v": 0, "curve": "sCurve"}, {"at": 7.875, "v": 0.6777}, {"at": 8.25, "v": 1, "curve": "exp"}],
+              "low": [{"at": 0, "v": 3, "curve": "exp"}, {"at": 9.0386, "v": 0, "curve": "equalPower"}],
+              "mid": [{"at": 0, "v": -17, "curve": "equalPower"}, {"at": 2.4375, "v": -6, "curve": "sCurve"}, {"at": 7.1875, "v": -120, "curve": "exp"}, {"at": 9.5625, "v": 2, "curve": "step"}, {"at": 10.6713, "v": 0, "curve": "exp"}], "resonance": 2.9422,
+              "reverb": {"send": [{"at": 0.5, "v": 0, "curve": "sCurve"}, {"at": 0.875, "v": 0.6178, "curve": "equalPower"}, {"at": 1.75, "v": 0.322, "curve": "sCurve"}, {"at": 1.9875, "v": 0}], "freeze": [{"at": 1.3308, "v": 0, "curve": "step"}, {"at": 1.3408, "v": 1, "curve": "step"}, {"at": 2.8896, "v": 0}], "decaySec": 3.6898, "dampHz": 3330.4769, "returnLevel": 0.6963}}}
+            """.trimIndent(),
+        )
+        assertContract("quiet release", render(rec, RecipeRenderTestSupport.glidePair))
+    }
 }

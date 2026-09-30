@@ -62,11 +62,11 @@ import kotlin.math.pow
  * cleanly, and a deck that jumps up on a downbeat is at full level when its transient starts.
  *
  * ## Freeze
- * While a reverb's freeze lane is >= 0.5 the reverb is frozen ([FdnReverb.freeze]). Its input is faded out over the
- * [FREEZE_GATE_BLOCKS] blocks before the freeze and back in after it, so muting the input never steps. When the
- * freeze ends, the frozen instance keeps sounding with an exponential fade at the reverb's RT60 and a fresh reverb
- * takes the send from then on (un-freezing an [FdnReverb] in place would restart its damping filters from stale
- * state).
+ * While a reverb's freeze lane is >= 0.5 (read every [BLOCK] frames) the reverb is frozen ([FdnReverb.freeze]: the
+ * held tail sustains and its input is muted). When the freeze ends, the frozen instance keeps sounding with an
+ * exponential fade at the reverb's RT60 (damping is not applied to that fade) and a fresh reverb takes the send
+ * from then on: un-freezing an [FdnReverb] in place restarts its damping filters from the state they had when the
+ * freeze began, and on a quiet mix that step is audible as clicks (see RecipeRenderEffectsTest).
  *
  * ## Splice contract and the boundary rule
  * The segment starts with [dev.muisc.transitions.core.Splice.GUARD_FRAMES] frames of A verbatim and ends with as
@@ -85,9 +85,6 @@ internal object RecipeRenderer {
 
     /** Blocks in the centred moving average applied to every continuous lane (1344 frames, ~30 ms at 44.1 kHz). */
     const val SMOOTH_TAPS = 21
-
-    /** Blocks over which a reverb's input is faded out before a freeze and back in after it. */
-    const val FREEZE_GATE_BLOCKS = 8
 
     /** Fade at A's end of overlap (10 ms at 44.1 kHz) and on the send feeds there. */
     const val DECLICK_FRAMES = 441
@@ -285,10 +282,10 @@ internal object RecipeRenderer {
         if (deck.usesEq) equalise(x, deck, r.lowHz, r.highHz, barAt, sr)
         if (!deck.hpf.isNeutral) filter(x, SvfMode.HIGH_PASS, deck.hpf, deck.resonance, barAt, sr)
         if (!deck.lpf.isNeutral) filter(x, SvfMode.LOW_PASS, deck.lpf, deck.resonance, barAt, sr)
-        val echoFeed = if (deck.usesEcho) feed(x, lead, BlockLane.sample(deck.echo!!.send, n, barAt, Domain.LINEAR), null) else null
+        val echoFeed = if (deck.usesEcho) feed(x, lead, BlockLane.sample(deck.echo!!.send, n, barAt, Domain.LINEAR)) else null
         val reverbFeed = if (deck.usesReverb) {
             val rv = deck.reverb!!
-            feed(x, lead, BlockLane.sample(rv.send, n, barAt, Domain.LINEAR), if (rv.freeze.isNeutral) null else freezeGate(rv.freeze, n, barAt))
+            feed(x, lead, BlockLane.sample(rv.send, n, barAt, Domain.LINEAR))
         } else null
         if (!deck.level.isNeutral) {
             val level = BlockLane.sample(deck.level, n, barAt, Domain.LEVEL)
@@ -367,38 +364,19 @@ internal object RecipeRenderer {
         }
     }
 
-    /** Pre-fader send feed from bar 0: `x * send * gate`. */
-    private fun feed(x: Array<FloatArray>, lead: Int, send: BlockLane, gate: BlockLane?): Array<FloatArray> {
+    /** Pre-fader send feed from bar 0: `x * send`. */
+    private fun feed(x: Array<FloatArray>, lead: Int, send: BlockLane): Array<FloatArray> {
         val n = x[0].size - lead
         val out = Array(x.size) { FloatArray(n) }
         val s = FloatArray(CHUNK)
-        val gt = FloatArray(CHUNK)
         var pos = 0
         while (pos < n) {
             val m = min(CHUNK, n - pos)
             send.fill(s, lead + pos, m)
-            if (gate != null) { gate.fill(gt, lead + pos, m); for (i in 0 until m) s[i] *= gt[i] }
             for (c in x.indices) { val y = out[c]; val src = x[c]; for (i in 0 until m) y[pos + i] = src[lead + pos + i] * s[i] }
             pos += m
         }
         return out
-    }
-
-    /** Input gate of a freezing reverb: 0 while frozen, ramping to 1 over [FREEZE_GATE_BLOCKS] blocks on either side. */
-    private fun freezeGate(freeze: ResolvedLane, n: Int, barAt: (Long) -> Double): BlockLane {
-        val frozen = frozenBlocks(freeze, n, barAt)
-        val nb = frozen.size
-        val v = DoubleArray(nb)
-        // Blocks since the last frozen one, counted so that the first block after a freeze starts at 0: the fresh
-        // reverb that takes over there must receive its input from silence.
-        var sinceFrozen = Int.MAX_VALUE / 2
-        for (k in 0 until nb) { sinceFrozen = if (frozen[k]) 0 else sinceFrozen + 1; v[k] = (sinceFrozen - 1).coerceAtLeast(0).toDouble() }
-        var untilFrozen = Int.MAX_VALUE / 2
-        for (k in nb - 1 downTo 0) {
-            untilFrozen = if (frozen[k]) 0 else untilFrozen + 1
-            v[k] = (min(v[k], untilFrozen.toDouble()) / FREEZE_GATE_BLOCKS).coerceIn(0.0, 1.0)
-        }
-        return BlockLane(v)
     }
 
     /** Whether the reverb is frozen in each block (lane value at the block start >= 0.5). */
