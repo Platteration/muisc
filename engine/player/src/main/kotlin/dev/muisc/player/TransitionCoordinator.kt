@@ -635,7 +635,7 @@ class TransitionCoordinator(
 
     private fun secondsToFrames(sec: Double): Long = Math.round(sec * sampleRate)
 
-    private fun retainKey(a: TrackRef, b: TrackRef): String = a.id + " " + b.id
+    private fun retainKey(a: TrackRef, b: TrackRef): String = a.id + "\u0000" + b.id
 
     private fun publishState() {
         _state.value = edges.values.filter { it.index >= currentIndex }.associate { it.index to it.state }.toSortedMap()
