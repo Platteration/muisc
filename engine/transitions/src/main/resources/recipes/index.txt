@@ -1,0 +1,11 @@
+# Built-in transition recipes, one file name per line (a classpath directory cannot be listed from inside a jar).
+# Order: beat-matched blends first, then tempo-agnostic moves, gentlest last.
+smooth-blend.json
+club-bass-swap.json
+drums-first.json
+long-glide.json
+tension-build.json
+filter-handoff.json
+echo-wash.json
+reverb-freeze-bridge.json
+radio-segue.json

@@ -1,0 +1,40 @@
+{
+  "id": "smooth-blend",
+  "name": "Smooth blend",
+  "description": "The classic long DJ blend. The next song is beat-matched and slides in underneath while the current one fades away, so for a while you hear both playing in time. The new song's bass is held back until partway through and then takes over from the old bass within one bar, so the two basslines never pile up, and the old song's treble is gently dipped as it leaves. Works best between songs with steady beats, similar tempos and keys that get along.",
+  "author": "Muisc",
+  "ambition": 0.3,
+  "tags": ["blend", "smooth", "beat-matched", "long"],
+  "vars": {
+    "len": { "default": 16, "min": 8, "max": 32, "label": "Length", "unit": "bars", "doc": "How many bars both songs play together", "integer": true },
+    "bassPoint": { "default": 0.5, "min": 0.25, "max": 0.75, "label": "Bass handover", "unit": "of the blend", "doc": "How far into the blend the new song's bass takes over (0.5 = halfway)" },
+    "bassCut": { "default": 12, "min": 6, "max": 24, "label": "Bass cut", "unit": "dB", "doc": "How far the bass that is not leading is turned down" },
+    "highDip": { "default": 6, "min": 0, "max": 12, "label": "Treble dip", "unit": "dB", "doc": "How far the old song's treble is dipped as it leaves" }
+  },
+  "timing": { "lengthBars": "len", "tempo": "match", "align": "phrase", "settleBars": 2, "holdBars": 2 },
+  "rules": { "maxKeyDistance": 2, "baseScore": 0.65 },
+  "a": {
+    "level": [
+      { "at": 0, "v": 1, "curve": "equalPower" },
+      { "at": "bars", "v": 0 }
+    ],
+    "low": [
+      { "at": "round(bars * bassPoint) - 1", "v": 0, "curve": "sCurve" },
+      { "at": "round(bars * bassPoint)", "v": "-bassCut" }
+    ],
+    "high": [
+      { "at": "bars / 2", "v": 0, "curve": "sCurve" },
+      { "at": "bars", "v": "-highDip" }
+    ]
+  },
+  "b": {
+    "level": [
+      { "at": 0, "v": 0, "curve": "equalPower" },
+      { "at": "bars", "v": 1 }
+    ],
+    "low": [
+      { "at": "round(bars * bassPoint) - 1", "v": "-bassCut", "curve": "sCurve" },
+      { "at": "round(bars * bassPoint)", "v": 0 }
+    ]
+  }
+}

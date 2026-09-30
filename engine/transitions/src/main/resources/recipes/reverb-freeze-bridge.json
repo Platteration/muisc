@@ -1,0 +1,54 @@
+{
+  "id": "reverb-freeze-bridge",
+  "name": "Reverb freeze bridge",
+  "description": "The current song dissolves into a darkening reverb, and its last moment is frozen into a hanging wash of sound. The next song rises gently out of that wash, thin at first and filling out as the frozen chord lets go. Nothing is time-stretched, so it suits songs that end on a sustained chord, ambient or vocal outros, and pairs whose tempos or keys are far apart.",
+  "author": "Muisc",
+  "ambition": 0.7,
+  "tags": ["reverb", "freeze", "ambient", "any-tempo", "bridge"],
+  "vars": {
+    "washBars": { "default": 2, "min": 1, "max": 4, "label": "Wash build", "unit": "bars", "doc": "Over how many bars the old song dissolves into the reverb", "integer": true },
+    "freezeBars": { "default": 2, "min": 1, "max": 4, "label": "Freeze", "unit": "bars", "doc": "How long the frozen wash hangs over the new song", "integer": true },
+    "tailBars": { "default": 2, "min": 2, "max": 4, "label": "Release", "unit": "bars", "doc": "How long the wash takes to fade after the freeze lets go", "integer": true },
+    "sendMax": { "default": 0.8, "min": 0.3, "max": 1, "label": "Reverb amount", "doc": "How much of the old song goes into the reverb" },
+    "washLevel": { "default": 0.8, "min": 0.3, "max": 1.2, "label": "Wash level", "doc": "How loud the reverb wash is" },
+    "darkHz": { "default": 3000, "min": 800, "max": 8000, "label": "Darken to", "unit": "Hz", "doc": "The old song is low-passed down to this as it dissolves; lower is darker" }
+  },
+  "timing": { "lengthBars": "washBars", "tempo": "none", "align": "phrase", "bEntersAtBar": "bars", "holdBars": "freezeBars + tailBars" },
+  "rules": { "baseScore": 0.5 },
+  "a": {
+    "level": [
+      { "at": 0, "v": 1 },
+      { "at": "bars - beat", "v": 1, "curve": "sCurve" },
+      { "at": "bars", "v": 0 }
+    ],
+    "lpf": [
+      { "at": 0, "v": 20000, "curve": "sCurve" },
+      { "at": "bars", "v": "darkHz" }
+    ],
+    "reverb": {
+      "send": [
+        { "at": 0, "v": 0, "curve": "sCurve" },
+        { "at": "bars - beat", "v": "sendMax" },
+        { "at": "bars", "v": 0 }
+      ],
+      "freeze": [
+        { "at": 0, "v": 0, "curve": "step" },
+        { "at": "bars - beat", "v": 1, "curve": "step" },
+        { "at": "bars + freezeBars", "v": 0 }
+      ],
+      "decaySec": 4,
+      "dampHz": 5000,
+      "returnLevel": "washLevel"
+    }
+  },
+  "b": {
+    "level": [
+      { "at": "bars", "v": 0, "curve": "sCurve" },
+      { "at": "bars + 2", "v": 1 }
+    ],
+    "hpf": [
+      { "at": "bars", "v": 250, "curve": "sCurve" },
+      { "at": "bars + freezeBars", "v": 20 }
+    ]
+  }
+}

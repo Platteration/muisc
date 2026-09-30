@@ -1,0 +1,45 @@
+{
+  "id": "tension-build",
+  "name": "Tension build",
+  "description": "A build-up and drop. Over the last bars of the current song a resonant high-pass filter climbs, stripping away its bass so it gets thinner and more urgent, and an echo swells on its final bars; then it stops dead and the next song drops in, beat-matched, on the downbeat. Big and showy: use it into songs that start with a beat or hit hard straight away, and where the energy goes up.",
+  "author": "Muisc",
+  "ambition": 0.85,
+  "tags": ["build", "drop", "filter", "echo", "beat-matched"],
+  "vars": {
+    "buildBars": { "default": 8, "min": 4, "max": 16, "label": "Build length", "unit": "bars", "doc": "How many bars the build-up takes", "integer": true },
+    "hpfTo": { "default": 1500, "min": 400, "max": 5000, "label": "Filter top", "unit": "Hz", "doc": "How high the high-pass climbs; higher is thinner" },
+    "q": { "default": 3, "min": 1, "max": 6, "label": "Resonance", "doc": "How sharp the filter's peak is" },
+    "echoSend": { "default": 0.6, "min": 0, "max": 1, "label": "Echo amount", "doc": "How much of the build goes into the echo (0 = none)" }
+  },
+  "timing": { "lengthBars": "buildBars", "tempo": "match", "align": "phrase", "settleBars": 2, "holdBars": 2 },
+  "rules": { "intro": ["BEAT_INTRO", "COLD_START"], "minEnergyDelta": -0.1, "baseScore": 0.6 },
+  "a": {
+    "level": [
+      { "at": 0, "v": 1 },
+      { "at": "bars - beat", "v": 1, "curve": "sCurve" },
+      { "at": "bars", "v": 0 }
+    ],
+    "hpf": [
+      { "at": 0, "v": 20, "curve": "exp" },
+      { "at": "bars", "v": "hpfTo" }
+    ],
+    "resonance": "q",
+    "echo": {
+      "send": [
+        { "at": "bars - 2", "v": 0, "curve": "exp" },
+        { "at": "bars", "v": "echoSend" },
+        { "at": "bars + beat", "v": 0 }
+      ],
+      "beats": 0.5,
+      "feedback": 0.55,
+      "dampHz": 3000,
+      "returnLevel": 1
+    }
+  },
+  "b": {
+    "level": [
+      { "at": "bars - beat", "v": 0, "curve": "exp" },
+      { "at": "bars", "v": 1 }
+    ]
+  }
+}

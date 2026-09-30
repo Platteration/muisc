@@ -1,0 +1,31 @@
+{
+  "id": "radio-segue",
+  "name": "Radio segue",
+  "description": "What a radio presenter does between records: the current song fades down over a few bars and the next one starts just as it is getting quiet, with no beat-matching at all. The old song's midrange is eased back as the new one starts so the two do not blur together. Short, gentle and safe for any pair of songs, including ones with no steady beat.",
+  "author": "Muisc",
+  "ambition": 0.1,
+  "tags": ["radio", "gentle", "short", "any-tempo"],
+  "vars": {
+    "fadeBars": { "default": 4, "min": 3, "max": 8, "label": "Fade length", "unit": "bars", "doc": "How many bars the old song takes to fade out", "integer": true },
+    "overlap": { "default": 1, "min": 0, "max": 2, "label": "Overlap", "unit": "bars", "doc": "How many bars before the old song is gone the new one starts (0 = straight after)", "integer": true },
+    "midDip": { "default": 4, "min": 0, "max": 9, "label": "Mid dip", "unit": "dB", "doc": "How far the old song's midrange is eased back under the new one" }
+  },
+  "timing": { "lengthBars": "fadeBars", "tempo": "none", "align": "downbeat", "bEntersAtBar": "bars - overlap", "holdBars": 2 },
+  "rules": { "baseScore": 0.45 },
+  "a": {
+    "level": [
+      { "at": 0, "v": 1, "curve": "equalPower" },
+      { "at": "bars", "v": 0 }
+    ],
+    "mid": [
+      { "at": "bars - overlap", "v": 0, "curve": "sCurve" },
+      { "at": "bars", "v": "-midDip" }
+    ]
+  },
+  "b": {
+    "level": [
+      { "at": "bars - overlap - beat", "v": 0, "curve": "sCurve" },
+      { "at": "bars - overlap", "v": 1 }
+    ]
+  }
+}

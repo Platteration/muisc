@@ -1,0 +1,38 @@
+{
+  "id": "filter-handoff",
+  "name": "Filter handoff",
+  "description": "A sweep instead of a blend. A high-pass filter rises on the current song, draining away its bass and body until only a thin, bright edge is left, while the next song opens up from a muffled low-pass to full sound. Neither song is time-stretched, so it works even when the tempos do not match: the filters keep the two songs out of each other's way. A resonant peak on the sweep makes the movement audible; turn it down for a subtler handoff.",
+  "author": "Muisc",
+  "ambition": 0.55,
+  "tags": ["filter", "sweep", "any-tempo"],
+  "vars": {
+    "sweepBars": { "default": 8, "min": 2, "max": 16, "label": "Sweep length", "unit": "bars", "doc": "How many bars the sweep takes", "integer": true },
+    "hpfTo": { "default": 4000, "min": 500, "max": 10000, "label": "Sweep top", "unit": "Hz", "doc": "Where the high-pass on the old song ends; higher leaves less of it" },
+    "q": { "default": 2, "min": 0.7, "max": 6, "label": "Resonance", "doc": "How sharp the peak on the old song's sweep is (0.7 = none, 6 = whistling)" },
+    "bLpfFrom": { "default": 300, "min": 100, "max": 2000, "label": "New song starts at", "unit": "Hz", "doc": "Where the low-pass on the new song starts; lower is more muffled" }
+  },
+  "timing": { "lengthBars": "sweepBars", "tempo": "none", "align": "phrase", "bEntersAtBar": 0, "holdBars": 1 },
+  "rules": { "baseScore": 0.55 },
+  "a": {
+    "level": [
+      { "at": 0, "v": 1, "curve": "equalPower" },
+      { "at": "bars", "v": 0 }
+    ],
+    "hpf": [
+      { "at": 0, "v": 20, "curve": "exp" },
+      { "at": "bars", "v": "hpfTo" }
+    ],
+    "resonance": "q"
+  },
+  "b": {
+    "level": [
+      { "at": 0, "v": 0, "curve": "equalPower" },
+      { "at": "bars", "v": 1 }
+    ],
+    "lpf": [
+      { "at": 0, "v": "bLpfFrom", "curve": "sCurve" },
+      { "at": "bars", "v": 20000 }
+    ],
+    "resonance": "clamp(q / 2, 0.707, 3)"
+  }
+}
