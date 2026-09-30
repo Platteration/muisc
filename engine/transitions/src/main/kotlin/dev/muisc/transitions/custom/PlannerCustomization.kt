@@ -60,6 +60,9 @@ class UserProfile(val dir: File) {
         learner = feedback.learner,
     )
 
-    /** Problems met while reading the profile so far (skipped files and entries). */
-    fun warnings(): List<String> = presets.warnings + styles.warnings + pins.warnings + feedback.warnings
+    /** Reads every part of the profile and returns the problems found (files and entries that were skipped). */
+    fun warnings(): List<String> {
+        presets.list(); styles.list(); pins.list()
+        return presets.warnings + styles.warnings + pins.warnings + feedback.warnings
+    }
 }
