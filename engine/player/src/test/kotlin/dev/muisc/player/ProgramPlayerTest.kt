@@ -288,12 +288,34 @@ class ProgramPlayerTest {
         }
     }
 
+    /**
+     * A sink that consumes like an audio device, but [speed] times faster than real time: [write] returns no sooner
+     * than the frames written so far would take to play at that speed. A device paces the player at 1x; an unpaced
+     * sink lets the pump run hundreds of times faster than real time, where a few milliseconds of decoder-thread
+     * preemption (one GC pause or a busy build machine) already count as a second of underrun.
+     */
+    private class PacedSink(private val inner: CapturingSink, private val speed: Double) : AudioSink by inner {
+        private var started = 0L
+        private var written = 0L
+        override fun write(interleaved: FloatArray, frames: Int) {
+            if (started == 0L) started = System.nanoTime()
+            inner.write(interleaved, frames)
+            written += frames
+            val due = started + (written * 1_000_000_000.0 / (sampleRate * speed)).toLong()
+            val wait = due - System.nanoTime()
+            if (wait > 0) java.util.concurrent.locks.LockSupport.parkNanos(wait)
+        }
+        fun toBuffer() = inner.toBuffer()
+    }
+
     @Test
     fun realtimePlayerWithDecoderThreadsCompletes() {
         val prefs = PlayerFixtures.prefs(a, b)
-        val player = ProgramPlayer(sr, 2, EngineLimits.PHONE, PlayerFixtures.streams(a, b), prefs, realtime = true)
+        val limits = EngineLimits.PHONE
+        val player = ProgramPlayer(sr, 2, limits, PlayerFixtures.streams(a, b), prefs, realtime = true)
         val program = PlaybackProgram(listOf(body(a, trimStart(a), trimEnd(a)), body(b, trimStart(b), trimEnd(b))))
-        val sink = CapturingSink(sr, 2)
+        // 16x real time: sixteen times more demanding than a phone, with scheduler jitter tolerated at ~60 ms.
+        val sink = PacedSink(CapturingSink(sr, 2), speed = 16.0)
         val events = ArrayList<PlayerEvent>()
         try {
             player.submit(EngineCommand.SetProgram(program))
@@ -301,9 +323,17 @@ class ProgramPlayerTest {
             events += player.events.drain()
             // Real time: a starved decoder ring plays silence and reports it; the output is the program plus exactly
             // the frames the underruns inserted.
-            val underrun = events.filterIsInstance<PlayerEvent.Underrun>().sumOf { it.frames.toLong() }
+            val underruns = events.filterIsInstance<PlayerEvent.Underrun>()
+            val underrun = underruns.sumOf { it.frames.toLong() }
             assertEquals(program.totalFrames + player.latencyFrames + underrun, written)
             assertTrue(underrun < sr, "underruns must be limited to the ring's first fill, was $underrun frames")
+            // And they are: every underrun happens while a body's ring is still doing its first fill.
+            val firstFill = Math.round(limits.ringSec * sr)
+            val bodyStarts = events.filterIsInstance<PlayerEvent.SegmentStarted>().filter { it.segment is Segment.Body }.map { it.atOutputFrame }
+            for (u in underruns) {
+                assertTrue(bodyStarts.any { u.atOutputFrame >= it && u.atOutputFrame < it + firstFill },
+                    "underrun of ${u.frames} frames at output frame ${u.atOutputFrame} is outside every ring's first fill (bodies start at $bodyStarts)")
+            }
             val out = sink.toBuffer()
             for (ch in 0 until 2) for (v in out[ch]) assertTrue(v.isFinite())
             assertTrue(player.isEnded)
