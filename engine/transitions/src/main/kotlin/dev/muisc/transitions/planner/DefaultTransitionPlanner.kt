@@ -43,11 +43,11 @@ import kotlin.math.abs
  *     the strategy itself when it implements [StrategyTraits], else [AMBITION]), `variety = 1 − prefs.varietyPenalty · [id == previousStrategyId]` (0 for the
  *     [COOLDOWN_IDS] repeated back to back), `modifierBonus = 1 + Σ bonus[m] · applicability(m)` over the
  *     attached modifiers ([MODIFIER_BONUS]) and `jitter = 1 + `[JITTER]` · uniform(−1, 1)` seeded from
- *     `(a.fingerprint, b.fingerprint, seed, id)` — the same pair, seed and strategy always jitter identically, and
+ *     `(a.identity, b.identity, seed, id)` — the same pair, seed and strategy always jitter identically, and
  *     `learned` is the [customization]'s learned multiplier for the strategy in the pair's context bucket
  *     (`custom.FeedbackLearner`, 0.5..1.5; exactly 1 without ratings or without a learner).
  *
- * **Pins.** When [customization] holds a [PairPin] for `(a.fingerprint, b.fingerprint)` and the pinned strategy
+ * **Pins.** When [customization] holds a [PairPin] for `(a.identity, b.identity)` and the pinned strategy
  * produced a candidate, that candidate is ranked first whatever its score (the others stay best-first by score).
  * When the pinned strategy is disabled, blocked, unknown or fails to plan, the normal ranking applies and
  * [PlanExplanation.pin] says why the pin was not used.
@@ -85,7 +85,7 @@ class DefaultTransitionPlanner(
         val scored = ArrayList<Pair<PlanCandidate, ScoreBreakdown>>(registry.strategies.size)
         val skipped = ArrayList<SkippedStrategy>()
         val notes = ArrayList<String>()
-        val pin: PairPin? = customization.pins.pin(a.analysis.fingerprint, b.analysis.fingerprint)
+        val pin: PairPin? = customization.pins.pin(a.analysis.identity, b.analysis.identity)
         val pinPreset: StrategyPreset? = pin?.presetId?.let { pid ->
             val p = customization.presets.preset(pid)
             when {
@@ -142,7 +142,7 @@ class DefaultTransitionPlanner(
             val energyPref = energyPreference(strategy, prefs.energy)
             val variety = variety(id, previousStrategyId, prefs.varietyPenalty)
             val modifierBonus = 1.0 + attached.entries.sumOf { (m, mApp) -> (MODIFIER_BONUS[m.id] ?: DEFAULT_MODIFIER_BONUS) * mApp }
-            val jitter = jitter(a.analysis.fingerprint, b.analysis.fingerprint, seed, id)
+            val jitter = jitter(a.analysis.identity, b.analysis.identity, seed, id)
             val learned = customization.learned(id, features)
             val score = fit * weight * energyPref * variety * modifierBonus * jitter * learned.multiplier
             val presetNote = when {
@@ -234,7 +234,7 @@ class DefaultTransitionPlanner(
             return (1.0 - varietyPenalty.coerceIn(0.0, 1.0)).coerceIn(0.0, 1.0)
         }
 
-        /** `1 + JITTER · u`, `u ∈ [−1, 1)` derived from SHA-256 of the fingerprints, the seed and the strategy id. */
+        /** `1 + JITTER · u`, `u ∈ [−1, 1)` derived from SHA-256 of the track identities, the seed and the strategy id. */
         fun jitter(fingerprintA: String, fingerprintB: String, seed: Long, strategyId: String): Double {
             val digest = MessageDigest.getInstance("SHA-256").digest("$fingerprintA\u0000$fingerprintB\u0000$seed\u0000$strategyId".toByteArray(Charsets.UTF_8))
             var bits = 0L

@@ -23,3 +23,14 @@ pre-approved; anything else needs a one-line request below and the lead's approv
 - `TransitionPrefs`: added `activePresets: Map<String, String> = emptyMap()` (strategy id → preset id). Defaulted, so
   existing JSON decodes unchanged; the JSON the app and CLI write gains an `activePresets` key when they encode
   defaults. Not part of `RenderKey` (the preset's values reach the key through `plan.params`).
+
+## 0.2.0 — user-customizable transitions
+
+- `TrackAnalysis.contentHash` (defaulted, additive): a hash of the decoded audio, set by `DefaultTrackAnalyzer`.
+  `TrackAnalysis.identity` (computed, not serialized) is `contentHash` when present, else `fingerprint`.
+- The planner's tie-break jitter and pinned pairs are keyed by `identity` instead of `fingerprint`. Behaviour change:
+  plans no longer change when a file's modification time changes (copy, backup restore, touch); for tracks analysed
+  after this change the jitter values differ from before, so near-tied candidates may rank in a different order than
+  they did under the old keys. Analyses cached before the change have no `contentHash` and keep the old keys.
+- Recipe format (`dev.muisc.transitions.recipe`), `sdk.StrategyTraits`, and the customization package
+  (`dev.muisc.transitions.custom`) added; `TransitionPrefs.activePresets` (defaulted, additive).

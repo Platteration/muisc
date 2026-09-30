@@ -222,6 +222,7 @@ class DefaultTrackAnalyzer(
             tuningCents = keyDetection.tuning.cents,
             onsetFrames = onsetFrames,
             textureMagnitude = spectrum.textureMagnitude,
+            contentHash = Fingerprint.ofBuffer(audio),
             extra = extra,
             analysisMillis = millis,
         )

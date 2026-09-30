@@ -128,11 +128,24 @@ data class TrackAnalysis(
     val onsetFrames: LongArray = LongArray(0),
     /** Per-bin median magnitude spectrum of the last ~15 s (513 bins at 22.05 kHz, frame 1024) — the "texture" of the outro for TextureCarry. */
     val textureMagnitude: FloatArray = FloatArray(0),
+    /**
+     * Hash of the decoded audio the analysis was made from (sample rate, channels, length and a stride sample of the
+     * PCM). Unlike [fingerprint] it does not include file metadata such as the modification time, so it stays the
+     * same when a file is copied, touched or re-tagged. It differs between engine sample rates. Empty for analyses
+     * made before this field existed.
+     */
+    val contentHash: String = "",
     /** Free-form extra numbers for experiments (never relied upon by shipped strategies). */
     val extra: Map<String, Double> = emptyMap(),
     /** Wall-clock milliseconds the analysis took (diagnostics). */
     val analysisMillis: Long = 0,
 ) {
+    /**
+     * The track's identity for anything that should follow the MUSIC rather than the file: the planner's tie-break
+     * jitter and the user's pinned pairs. [contentHash] when known, else [fingerprint].
+     */
+    val identity: String get() = contentHash.ifEmpty { fingerprint }
+
     val durationSec: Double get() = totalFrames.toDouble() / sampleRate
     val trimmedDurationSec: Double get() = (trimEndFrame - trimStartFrame).toDouble() / sampleRate
     fun framesToSec(frames: Long): Double = frames.toDouble() / sampleRate

@@ -11,7 +11,9 @@ import java.io.File
 
 /**
  * "Always use this transition from A into B": a strategy (optionally with a preset and/or explicit params) chosen by
- * the user for one ORDERED pair of tracks, identified by their analysis fingerprints. B → A is a different pair.
+ * the user for one ORDERED pair of tracks. B → A is a different pair. The tracks are identified by
+ * [dev.muisc.analysis.model.TrackAnalysis.identity] (a hash of the decoded audio), so a pin keeps working when the
+ * files are copied, touched or re-tagged; the property names keep the word "fingerprint" for file-format stability.
  *
  * When the pinned strategy is applicable to the pair the planner ranks it first; when it is blocked (or disabled,
  * unknown, or its `plan()` fails) the planner falls back to the normal ranking and says why in the explanation.

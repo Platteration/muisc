@@ -15,8 +15,9 @@ import java.io.File
 
 /**
  * `muisc pin set <a> <b> <strategyId> [--preset id] [--set k=v] | list | clear <a> <b>` — "always use this transition
- * from A into B". Pins are stored in `<profile-dir>/pins.json` by the tracks' analysis fingerprints (A and B are
- * audio files, analysed through the cache; `--fingerprints` takes the fingerprints themselves). A pin is directional.
+ * from A into B". Pins are stored in `<profile-dir>/pins.json` by the tracks' identities (TrackAnalysis.identity:
+ * a hash of the decoded audio, so a pin survives copying, touching or re-tagging the files; A and B are audio files,
+ * analysed through the cache; `--fingerprints` takes the identities themselves). A pin is directional.
  * The planner ranks a pinned strategy first whenever it is applicable to the pair and says why when it is not.
  */
 class PinCommand : CliktCommand(name = "pin") {
@@ -35,7 +36,7 @@ internal object PinArgs {
     fun resolve(ctx: CliContext, arg: String, fingerprints: Boolean): Track {
         if (fingerprints) return Track(arg, "", null)
         val ref = ctx.trackRef(File(arg))
-        return Track(ref.analysis.fingerprint, File(arg).name, ref)
+        return Track(ref.analysis.identity, File(arg).name, ref)
     }
 }
 
