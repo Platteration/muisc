@@ -56,10 +56,11 @@ import kotlin.math.pow
  * (linear gain for level and dB lanes, ln Hz for cutoffs), smoothed by a [SMOOTH_TAPS]-block moving average over
  * the ~30 ms that FOLLOW each block, and interpolated linearly per sample. So every change is at least a ~30 ms
  * ramp (a `step` included), and the ramp ENDS on the point's bar (up to one block, 1.5 ms, early): a lane has
- * reached each point's value when the timeline reaches the point. Both halves matter on beat-aligned moves. A gain that falls to silence within a few
- * milliseconds *after* a transient cuts the transient short, which is audible (and measurable) as a tick although
- * the waveform has no discontinuity; a cut that is complete when the downbeat's transient arrives removes it
- * cleanly, and a deck that jumps up on a downbeat is at full level when its transient starts.
+ * reached each point's value when the timeline reaches the point. Both halves matter on beat-aligned moves. A gain
+ * that falls to silence within a few milliseconds *after* a transient cuts the transient short, which is audible
+ * (and measurable) as a tick although the waveform has no discontinuity; a cut that is complete when the
+ * downbeat's transient arrives removes it cleanly, and a deck that jumps up on a downbeat is at full level when its
+ * transient starts. Freeze lanes are not smoothed (see below).
  *
  * ## Freeze
  * While a reverb's freeze lane is >= 0.5 (read every [BLOCK] frames) the reverb is frozen ([FdnReverb.freeze]: the
@@ -83,7 +84,7 @@ internal object RecipeRenderer {
     /** Frames between two lane evaluations. */
     const val BLOCK = 64
 
-    /** Blocks in the centred moving average applied to every continuous lane (1344 frames, ~30 ms at 44.1 kHz). */
+    /** Blocks in the look-ahead moving average applied to every continuous lane (1344 frames, ~30 ms at 44.1 kHz). */
     const val SMOOTH_TAPS = 21
 
     /** Fade at A's end of overlap (10 ms at 44.1 kHz) and on the send feeds there. */
