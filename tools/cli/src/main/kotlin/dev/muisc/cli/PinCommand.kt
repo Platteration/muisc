@@ -44,22 +44,22 @@ class PinSetCommand : MuiscCommand("set") {
     private val a by argument("A", help = "Outgoing track (audio file, or a fingerprint with --fingerprints).")
     private val b by argument("B", help = "Incoming track.")
     private val strategyId by argument("STRATEGY", help = "Strategy id (built-in or recipe:<id>).")
-    private val presetId by option("--preset", "--with-preset", metavar = "ID", help = "Preset to use for the pinned strategy.")
     private val sets by option("--set", metavar = "ID=VALUE", help = "Parameter value for the pinned strategy (repeatable; beats the preset).").multiple()
     private val note by option("--note", metavar = "TEXT", help = "Shown next to \"pinned by you\".")
     private val fingerprints by option("--fingerprints", help = "A and B are analysis fingerprints, not files.").flag()
 
     override fun execute(ctx: CliContext) {
         val profile = ctx.requireProfile()
+        // `--preset` is the option every command shares (MuiscCommand); here it names the pin's preset.
+        val presetId = ctx.preset?.id
         val strategy = ctx.registry.strategy(strategyId)
         if (strategy == null && !strategyId.startsWith(TransitionRecipe.STRATEGY_PREFIX)) {
             throw CliktError("unknown strategy '$strategyId'. Known: ${ctx.registry.strategyIds.joinToString(", ")} (or recipe:<id>)")
         }
         val values = Sets.parse(sets)
         if (strategy != null) PresetValidation.check(strategy, values)?.let { throw CliktError(it) }
-        presetId?.let { id ->
-            val p = profile.presetLookup.preset(id) ?: throw CliktError("unknown preset '$id'. Known: ${profile.presets.all().joinToString(", ") { it.id }}")
-            if (p.strategyId != strategyId) throw CliktError("preset '$id' is for ${p.strategyId}, not $strategyId")
+        ctx.preset?.let { p ->
+            if (p.strategyId != strategyId) throw CliktError("preset '${p.id}' is for ${p.strategyId}, not $strategyId")
         }
         val ta = PinArgs.resolve(ctx, a, fingerprints)
         val tb = PinArgs.resolve(ctx, b, fingerprints)

@@ -237,7 +237,9 @@ class CustomizationCommandsTest {
 
     @Test
     fun `a pin on real files is honoured by plan, and a blocked pin says why`() {
-        val set = run(PinCommand(), "set", songs.a.absolutePath, songs.b.absolutePath, "crossfade", "--preset", "long-crossfade")
+        val unpinned = Cli.run(cache, "plan", songs.a.absolutePath, songs.b.absolutePath, "--profile-dir", profileDir.absolutePath)
+        assertFalse(unpinned.substringAfter("candidates (").lines().drop(2).first().contains("crossfade"), "the crossfade is not already first")
+        val set =run(PinCommand(), "set", songs.a.absolutePath, songs.b.absolutePath, "crossfade", "--preset", "long-crossfade")
         assertContains(set, "now: pinned by you")
         val plan = Cli.run(cache, "plan", songs.a.absolutePath, songs.b.absolutePath, "--profile-dir", profileDir.absolutePath)
         val firstCandidate = plan.substringAfter("candidates (").lines().drop(2).first()
