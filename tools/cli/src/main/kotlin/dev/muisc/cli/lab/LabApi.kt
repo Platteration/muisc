@@ -391,7 +391,7 @@ class LabApi(
                     val bucket = f.bucket ?: continue
                     val t = tallies[strategy]?.get(bucket.key) ?: continue
                     addJsonObject {
-                        put("strategy", strategy); put("bucket", bucket.label); put("n", t.n)
+                        put("strategy", strategy); put("bucket", bucket.label); put("n", t.n); put("skips", t.implicitN)
                         put("mean", LabJson.num(t.sum / t.n, 3)); put("weight", LabJson.num(f.multiplier, 3))
                     }
                 }

@@ -139,6 +139,8 @@
     <string name="settings_transitions_enabled">DJ transitions</string>
     <string name="settings_allow_in_albums">Allow transitions inside albums</string>
     <string name="settings_keep_album_flow">Keep album flow for consecutive album tracks</string>
+    <string name="settings_learn_from_skips">Learn from skips</string>
+    <string name="settings_learn_from_skips_body">Skipping during a transition, or in the first 20 seconds after it, counts as a small thumbs-down for that technique in similar pairs. Albums never count.</string>
     <string name="settings_max_stretch">Max tempo stretch (%)</string>
     <string name="settings_max_pitch">Max pitch shift (semitones)</string>
     <string name="settings_key_lock">Key lock (preserve pitch when stretching)</string>
@@ -204,7 +206,7 @@
     <string name="dj_unpin">Remove pin</string>
     <string name="dj_unpin_body">Stop pinning %1$s?</string>
     <string name="dj_learned">Learned preferences</string>
-    <string name="dj_learned_body">Your ratings raise or lower a technique\'s score in similar situations (tempo matched or not, in key or not, energy rising or falling), between ×0.5 and ×1.5. A few ratings move it a little; many move it more.</string>
+    <string name="dj_learned_body">Your ratings raise or lower a technique\'s score in similar situations (tempo matched or not, in key or not, energy rising or falling), between ×0.5 and ×1.5. A few ratings move it a little; many move it more. With Learn from skips on, a skipped transition counts as a quarter of a thumbs-down, and skips alone never lower a score below ×0.83.</string>
     <string name="dj_learned_empty">Nothing learned yet. Rate transitions in the Transition Lab, or run a blind A/B test there.</string>
     <string name="dj_forget">Forget</string>
     <string name="dj_forget_all">Forget all</string>

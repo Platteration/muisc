@@ -64,9 +64,9 @@ class TransitionCoordinatorTest {
 
     private fun items(vararg tracks: SyntheticTrack) = tracks.map { QueueItem(it.trackRef.source, it.trackRef.albumId, it.trackRef.title, it.trackRef.artist, it.id) }
 
-    private inner class FakeAnalyses : AnalysisService {
+    private inner class FakeAnalyses(tracks: List<SyntheticTrack> = listOf(a, b)) : AnalysisService {
         var urgentCalls = 0
-        private val byId = listOf(a, b).associate { it.trackRef.source to it.analysis }
+        private val byId = tracks.associate { it.trackRef.source to it.analysis }
         override suspend fun analysis(track: AudioSourceId, urgent: Boolean): TrackAnalysis {
             if (urgent) urgentCalls++
             return byId[track] ?: error("no analysis for $track")
@@ -129,10 +129,12 @@ class TransitionCoordinatorTest {
         scope: kotlinx.coroutines.CoroutineScope,
         analyses: AnalysisService = FakeAnalyses(),
         gate: RenderGate = RenderGate.DEFAULT,
+        prefs: TransitionPrefs = this.prefs,
+        onSkip: ((TransitionSkip) -> Unit)? = null,
     ) = TransitionCoordinator(
         planner = planner, liveFactory = live, renderer = renderer, programBuilder = DefaultProgramBuilder(),
         player = player, analyses = analyses, gate = gate, limits = limits, clock = clock, scope = scope,
-        prefsProvider = { prefs }, seed = SEED,
+        prefsProvider = { prefs }, seed = SEED, onTransitionSkipped = onSkip,
     )
 
     private fun candidate(s: TransitionStrategy, p: TransitionPlan, score: Double) = PlanCandidate(s, Applicability.of(score, "test"), score, p)
@@ -428,6 +430,168 @@ class TransitionCoordinatorTest {
             coord.shutdown()
         } finally {
             player3.close()
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------ skips as feedback
+
+    /** Renders one block, hands the player's events to [coord] and lets it act on them. */
+    private fun kotlinx.coroutines.test.TestScope.step(coord: TransitionCoordinator) {
+        pump(1)
+        for (ev in player.events.drain()) coord.onPlayerEvent(ev)
+        advanceUntilIdle()
+    }
+
+    private fun kotlinx.coroutines.test.TestScope.playUntil(coord: TransitionCoordinator, what: String, done: () -> Boolean) {
+        var n = 0
+        while (!done()) {
+            assertTrue(n++ < 20_000, "never reached: $what (position ${player.position})")
+            step(coord)
+        }
+    }
+
+    private fun segmentPlaying(): Segment? = installedSegments().getOrNull(player.position.segmentIndex)
+
+    /** Empties the player between two scenarios and drops its events, so the next coordinator starts clean. */
+    private fun stopAndForget() {
+        player.submit(EngineCommand.SetProgram(PlaybackProgram(emptyList())))
+        pump(1)
+        player.events.drain()
+    }
+
+    /** Queue [tracks] in [context] with a rendered crossfade, and play A up to [secondsBeforeExit] before its exit. */
+    private fun kotlinx.coroutines.test.TestScope.readyToTransition(
+        context: PlaybackContext,
+        skips: MutableList<TransitionSkip>,
+        next: SyntheticTrack = b,
+        renderer: TransitionRenderer? = null,
+        prefs: TransitionPrefs = this@TransitionCoordinatorTest.prefs,
+    ): TransitionCoordinator {
+        streams[next.trackRef.source] = next.audio
+        val f = PlayerFixtures.features(a, next, prefs)
+        val r = if (next === b) rendered else PlayerFixtures.crossfadeRender(a, next, prefs, fadeSec = 3.0, seed = SEED)
+        val planner = FakePlanner(listOf(candidate(strategy, r.plan, 0.8)), f)
+        val coord = coordinator(planner, renderer ?: FakeRenderer(mapOf("crossfade" to { r })), FakeLiveFactory(), this,
+            analyses = FakeAnalyses(listOf(a, next)), prefs = prefs, onSkip = { skips += it })
+        coord.onQueue(context, items(a, next), 0)
+        advanceUntilIdle()
+        step(coord)
+        player.submit(EngineCommand.Seek(r.plan.aExitFrame - sr))
+        step(coord)
+        return coord
+    }
+
+    @Test
+    fun aSkipDuringARenderedTransitionIsReportedOnceAsWeakFeedback() = runTest {
+        val skips = ArrayList<TransitionSkip>()
+        val coord = readyToTransition(PlaybackContext.PLAYLIST, skips)
+        assertEquals(CoordinatorState.Ready("crossfade"), coord.state.value[0])
+        playUntil(coord, "the transition") { segmentPlaying() is Segment.Rendered }
+
+        coord.onUserSkip()
+        advanceUntilIdle()
+        val s = skips.single()
+        assertEquals(TransitionSkip("A", "B", "crossfade", features, TransitionSkip.Phase.DURING, 0.0), s)
+
+        // The skip landed in B's body: skipping again right away is the same transition, still one report.
+        playUntil(coord, "B's body") { (segmentPlaying() as? Segment.Body)?.track?.id == "B" }
+        coord.onUserSkip()
+        advanceUntilIdle()
+        assertEquals(1, skips.size, skips.toString())
+        coord.shutdown()
+    }
+
+    @Test
+    fun theSameTransitionPlayedAgainIsNotReportedTwice() = runTest {
+        val skips = ArrayList<TransitionSkip>()
+        val coord = readyToTransition(PlaybackContext.PLAYLIST, skips)
+        playUntil(coord, "the transition") { segmentPlaying() is Segment.Rendered }
+        coord.onUserSkip(); advanceUntilIdle()
+        assertEquals(1, skips.size)
+        step(coord)
+        // The listener goes back and plays the pair again (the retained render is reused) and skips it again.
+        coord.onQueue(PlaybackContext.PLAYLIST, emptyList(), 0); advanceUntilIdle()
+        coord.onQueue(PlaybackContext.PLAYLIST, items(a, b), 0); advanceUntilIdle()
+        step(coord)
+        player.submit(EngineCommand.Seek(plan.aExitFrame - sr)); step(coord)
+        playUntil(coord, "the transition again") { segmentPlaying() is Segment.Rendered }
+        coord.onUserSkip(); advanceUntilIdle()
+        assertEquals(1, skips.size, skips.toString())
+        coord.shutdown()
+    }
+
+    @Test
+    fun aSkipJustAfterBTakesOverCountsAndTwoMinutesLaterDoesNot() = runTest {
+        val long = PlayerFixtures.track(PlayerFixtures.song(124.0, 5, bars = 72, seed = 9), "L", albumId = "album2")
+        run {
+            val skips = ArrayList<TransitionSkip>()
+            val coord = readyToTransition(PlaybackContext.SHUFFLE, skips, next = long)
+            playUntil(coord, "L's body") { (segmentPlaying() as? Segment.Body)?.track?.id == "L" }
+            val body = segmentPlaying() as Segment.Body
+            player.submit(EngineCommand.Seek(body.fromFrame + 5L * sr))
+            step(coord)
+            coord.onUserSkip(); advanceUntilIdle()
+            val s = skips.single()
+            assertEquals(TransitionSkip.Phase.JUST_AFTER, s.phase)
+            assertEquals("L", s.bId)
+            assertTrue(s.secondsAfter in 5.0..6.0, "${s.secondsAfter}")
+            coord.shutdown()
+        }
+        stopAndForget()
+        run {
+            val skips = ArrayList<TransitionSkip>()
+            val coord = readyToTransition(PlaybackContext.SHUFFLE, skips, next = long)
+            playUntil(coord, "L's body") { (segmentPlaying() as? Segment.Body)?.track?.id == "L" }
+            val body = segmentPlaying() as Segment.Body
+            // Two minutes into B: the skip is about the song, not the transition.
+            player.submit(EngineCommand.Seek(body.fromFrame + 120L * sr))
+            step(coord)
+            assertTrue(player.position.trackFrame - body.fromFrame >= 120L * sr, "${player.position}")
+            coord.onUserSkip(); advanceUntilIdle()
+            assertEquals(emptyList(), skips)
+            coord.shutdown()
+        }
+    }
+
+    @Test
+    fun albumPlaybackNeverCountsEvenWhenItTransitions() = runTest {
+        val skips = ArrayList<TransitionSkip>()
+        // The listener allowed transitions inside albums: the album really transitions, and a skip still never counts.
+        val coord = readyToTransition(PlaybackContext.ALBUM, skips, prefs = prefs.copy(allowInAlbums = true))
+        assertEquals(CoordinatorState.Ready("crossfade"), coord.state.value[0])
+        playUntil(coord, "the transition") { segmentPlaying() is Segment.Rendered }
+        coord.onUserSkip(); advanceUntilIdle()
+        assertEquals(emptyList(), skips)
+        coord.shutdown()
+    }
+
+    @Test
+    fun aSkipDuringALiveFallbackOrAfterADjSkipDoesNotCount() = runTest {
+        run {
+            val skips = ArrayList<TransitionSkip>()
+            // Every render fails: the edge falls back to a live crossfade, which is not the planner's choice.
+            val coord = readyToTransition(PlaybackContext.PLAYLIST, skips, renderer = FakeRenderer(emptyMap()))
+            assertTrue(coord.state.value[0] is CoordinatorState.Live, "${coord.state.value[0]}")
+            playUntil(coord, "the live transition") { segmentPlaying() is Segment.Live }
+            coord.onUserSkip(); advanceUntilIdle()
+            assertEquals(emptyList(), skips)
+            coord.shutdown()
+        }
+        stopAndForget()
+        run {
+            val skips = ArrayList<TransitionSkip>()
+            val coord = coordinator(FakePlanner(listOf(candidate(strategy, plan, 0.8)), features), FakeRenderer(mapOf("crossfade" to { rendered })),
+                FakeLiveFactory(), this, onSkip = { skips += it })
+            coord.onQueue(PlaybackContext.PLAYLIST, items(a, b), 0); advanceUntilIdle()
+            step(coord)
+            // Early in A with the render installed: a DJ skip jumps to 4 bars before the exit. Skipping A is not
+            // feedback, nor is skipping the transition the listener asked for.
+            coord.onUserSkip(); advanceUntilIdle()
+            assertTrue(coord.transitionLog.any { "DJ skip" in it }, coord.transitionLog.toString())
+            playUntil(coord, "the transition") { segmentPlaying() is Segment.Rendered }
+            coord.onUserSkip(); advanceUntilIdle()
+            assertEquals(emptyList(), skips)
+            coord.shutdown()
         }
     }
 

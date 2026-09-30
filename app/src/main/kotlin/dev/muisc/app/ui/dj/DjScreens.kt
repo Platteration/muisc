@@ -175,7 +175,7 @@ private val djEntries = listOf(
     DjEntry(R.string.dj_recipes, Icons.Rounded.GraphicEq, { s -> "${s.recipes.count { it.inUse }} in use · ${s.recipes.size} found" + if (s.recipes.any { it.errorCount > 0 }) " · some with errors" else "" }, { it.toDjRecipes() }),
     DjEntry(R.string.dj_presets, Icons.Rounded.Tune, { s -> "${s.presets.count { !it.builtIn }} yours · ${s.presets.count { it.builtIn }} built in" }, { it.toDjPresets() }),
     DjEntry(R.string.dj_pins, Icons.Rounded.PushPin, { s -> if (s.pins.isEmpty()) "None yet — pin a pair in the Lab" else "${s.pins.size} pinned" }, { it.toDjPins() }),
-    DjEntry(R.string.dj_learned, Icons.Rounded.TrendingUp, { s -> if (s.learned.isEmpty()) "Nothing learned yet" else "${s.learned.sumOf { it.ratings }} ratings" }, { it.toDjLearned() }),
+    DjEntry(R.string.dj_learned, Icons.Rounded.TrendingUp, { s -> if (s.learned.isEmpty()) "Nothing learned yet" else learnedCounts(s.learned.sumOf { it.ratings }, s.learned.sumOf { it.skips }) }, { it.toDjLearned() }),
 )
 
 /** The body of Settings → DJ: one entry per customization screen, and the problems found. */
@@ -474,12 +474,23 @@ fun DjLearnedScreen(navigator: MuiscNavigator) {
     }
 }
 
+/** `3 ratings`, `3 ratings · 2 skips`, `1 skip` (explicit ratings and skipped transitions, counted apart). */
+private fun learnedCounts(ratings: Int, skips: Int): String {
+    val r = if (ratings == 1) "1 rating" else "$ratings ratings"
+    val k = if (skips == 1) "1 skip" else "$skips skips"
+    return when {
+        skips == 0 -> r
+        ratings == 0 -> k
+        else -> "$r · $k"
+    }
+}
+
 @Composable
 private fun LearnedRow(row: LearnedInfo) {
     val up = row.multiplier >= 1.0
     ListItem(
         headlineContent = { Text(row.bucketLabel.replaceFirstChar { it.uppercase() }) },
-        supportingContent = { Text(if (row.ratings == 1) "1 rating" else "${row.ratings} ratings", style = MaterialTheme.typography.bodySmall) },
+        supportingContent = { Text(learnedCounts(row.ratings, row.skips), style = MaterialTheme.typography.bodySmall) },
         trailingContent = {
             Text(
                 "×" + formatDouble(row.multiplier, 2),

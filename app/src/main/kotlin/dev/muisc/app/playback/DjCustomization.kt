@@ -38,8 +38,6 @@ import dev.muisc.transitions.recipe.RecipeValidator
 import dev.muisc.transitions.recipe.TransitionRecipe
 import java.io.File
 import java.io.IOException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -121,8 +119,9 @@ class SessionPins : PinLookup {
 
 /**
  * A [TransitionPlanner] that forwards to the current [DefaultTransitionPlanner]. The engine's planner takes its
- * customization at construction and a [FeedbackLearner] cannot be emptied in place, so "reset learned preferences"
- * builds a new planner over a fresh learner and swaps it in here; the coordinator and the Lab keep their reference.
+ * customization at construction, so a new customization means a new planner, swapped in here; the coordinator and
+ * the Lab keep their reference. ("Reset learned preferences" does not need it: the feedback store empties its
+ * [FeedbackLearner] in place, under the file's lock.)
  */
 class DjPlanner(initial: DefaultTransitionPlanner) : TransitionPlanner {
     @Volatile
@@ -185,7 +184,6 @@ class DjCustomization(
 
     val recipesDir: File = File(dir, RECIPES_DIR)
     private val styleFile: File = File(dir, STYLE_FILE)
-    private val feedbackFile: File = File(dir, FEEDBACK_FILE)
 
     val library: RecipeLibrary = RecipeLibrary(recipesDir, RecipeValidator(base.modifiers.map { it.id }.toSet()), classLoader)
 
@@ -260,6 +258,7 @@ class DjCustomization(
         for (p in recipeSet.errors) out += "recipe ${p.source.substringAfterLast('/')}: ${p.problem}"
         for ((id, why) in recipeSkipped) out += "recipe '$id' is not used: $why"
         styleProblem?.let { out += it }
+        skipProblem?.let { out += it }
         try {
             out += profile.warnings()
         } catch (t: Throwable) {
@@ -437,21 +436,31 @@ class DjCustomization(
     fun record(strategyId: String, features: PairFeatures, rating: Rating): LearnedFactor =
         profile.feedback.record(strategyId, features, rating)
 
+    @Volatile
+    private var skipProblem: String? = null
+
     /**
-     * Forgets the ratings of [strategyId] (every strategy when null). The previous `feedback.json` is kept as
-     * `feedback.json.bak` (replacing an older backup), so a reset tapped by mistake can be undone by hand. The
-     * planner switches to the new tallies immediately.
+     * Records a skipped transition of [strategyId] on a pair with [features] as implicit feedback (a weak down-vote,
+     * see [FeedbackLearner.recordImplicit]) through the same locked store path as [record]. Never throws: a skip
+     * that cannot be saved is reported in [problems] and null is returned.
+     */
+    fun recordSkip(strategyId: String, features: PairFeatures): LearnedFactor? = try {
+        profile.feedback.recordImplicit(strategyId, features).also { skipProblem = null }
+    } catch (t: Throwable) {
+        skipProblem = "a skipped transition could not be saved as feedback: ${t.message ?: t.javaClass.simpleName}"
+        null
+    }
+
+    /**
+     * Forgets the ratings and skips of [strategyId] (every strategy when null). The previous `feedback.json` is kept
+     * as `feedback.json.bak` (replacing an older backup), so a reset tapped by mistake can be undone by hand. The
+     * reset is a read-modify-write under the store's file lock ([dev.muisc.transitions.custom.FileFeedbackStore.reset]),
+     * so a rating or skip saved at the same moment is neither lost nor brought back. The planner uses the new tallies
+     * immediately (its learner is the store's).
      */
     @Synchronized
     fun resetLearned(strategyId: String?) {
-        val keep: Map<String, Map<String, dev.muisc.transitions.custom.RatingTally>> =
-            if (strategyId == null) emptyMap() else profile.feedback.learner.snapshot().filterKeys { it != strategyId }
-        if (feedbackFile.isFile) {
-            Files.move(feedbackFile.toPath(), File(dir, "$FEEDBACK_FILE.bak").toPath(), StandardCopyOption.REPLACE_EXISTING)
-        }
-        if (keep.isNotEmpty()) AtomicFiles.write(feedbackFile, FeedbackLearner(keep).toJson() + "\n")
-        profile = UserProfile(dir)
-        planner.replace(buildPlanner())
+        profile.feedback.reset(strategyId, File(dir, "$FEEDBACK_FILE.bak"))
     }
 
     // ================================================================================================ planner

@@ -84,6 +84,9 @@ object EngineGraph {
 
         val sinkFactory: (Int, Int) -> AudioSink = { rate, channels -> AudioTrackSink(rate, channels) }
 
+        // "Learn from skips" (Settings, on by default): read when each skip is recorded.
+        val skipFeedback = SkipFeedback(dj, appGraph.scope, enabled = { appGraph.settings.currentUiPrefs().learnFromSkips })
+
         val controller = EngineControllerImpl(
             context = app,
             sampleRate = sampleRate,
@@ -106,6 +109,7 @@ object EngineGraph {
                 appGraph.scope.launch { appGraph.libraryRepository.recordPlay(song.id, playbackContext) }
             },
             shaper = dj,
+            onTransitionSkipped = skipFeedback::onTransitionSkipped,
         )
 
         val lab = TransitionLabImpl(
@@ -135,6 +139,7 @@ object EngineGraph {
             scope = appGraph.scope,
         )
         customization.start()
+        skipFeedback.onRecorded = customization::learnedChanged
         // Recipes are validated at every knob setting, which is too slow for the main thread; they join the
         // registry when read. A failure is reported by the DJ settings, never thrown.
         appGraph.scope.launch(Dispatchers.IO) { customization.refresh() }

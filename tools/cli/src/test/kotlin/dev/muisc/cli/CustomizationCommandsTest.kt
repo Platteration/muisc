@@ -378,4 +378,18 @@ class CustomizationCommandsTest {
         assertContains(assertFailsWith<CliktError> { run(RateCommand(), songs.a.absolutePath, songs.b.absolutePath, "warp", "up") }.message!!, "unknown strategy")
         assertContains(assertFailsWith<CliktError> { run(RateCommand(), "sideways") }.message!!, "usage")
     }
+
+    @Test
+    fun `rate show lists skips apart from ratings, also for a context with skips only`() {
+        // As the app writes it with "Learn from skips": three skipped bassSwap transitions, no rating.
+        File(profileDir, "feedback.json").writeText(
+            """{"version": 2, "strategies": {"bassSwap": {"matched.inkey.rising": {"implicitN": 3, "implicitSum": 0.0}}}}""",
+        )
+        val show = run(RateCommand(), "show")
+        val expected = "%.2f".format(FeedbackLearner.multiplier(dev.muisc.transitions.custom.RatingTally(implicitN = 3)))
+        val row = show.lines().single { it.startsWith("bassSwap") }
+        assertTrue(row.split(Regex("\\s{2,}")).containsAll(listOf("0", "–", "3", "×$expected")), row)
+        assertTrue("NaN" !in show, show)
+        assertContains(show, "skips")
+    }
 }

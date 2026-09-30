@@ -53,14 +53,16 @@ class RateCommand : MuiscCommand("rate") {
         }
         val tallies = learner.snapshot()
         val rows = ArrayList<List<String>>()
-        rows += listOf("strategy", "context", "ratings", "mean", "weight")
+        rows += listOf("strategy", "context", "ratings", "mean", "skips", "weight")
         for ((strategy, f) in table) {
             val bucket = f.bucket ?: continue
             val t = tallies[strategy]?.get(bucket.key) ?: continue
-            rows += listOf(strategy, bucket.label, "${t.n}", Fmt.num(t.sum / t.n, 2), "×" + Fmt.num(f.multiplier, 2))
+            val mean = if (t.n > 0) Fmt.num(t.sum / t.n, 2) else "–"
+            rows += listOf(strategy, bucket.label, "${t.n}", mean, "${t.implicitN}", "×" + Fmt.num(f.multiplier, 2))
         }
         echo(Fmt.table(rows))
         echo("\nweight = 0.5 + (${FeedbackLearner.PRIOR_STRENGTH} + Σ rating) / (${2 * FeedbackLearner.PRIOR_STRENGTH} + n), rating up = 1, down = 0, stars (s − 1)/4")
+        echo("skips (the app's \"learn from skips\") count as ${FeedbackLearner.IMPLICIT_WEIGHT} of a down-vote each, at most ${FeedbackLearner.IMPLICIT_CAP} down-votes together")
         echo("contexts: ${ContextBucket.ALL.size} = beat-matchable (≤ ${Fmt.num(ContextBucket.MATCH_STRETCH_PERCENT, 0)} % stretch) × keys compatible × energy rising")
     }
 }

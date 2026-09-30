@@ -149,7 +149,7 @@ class CustomizationImpl(
         }
         val learned = core.learned().mapNotNull { (id, f) ->
             val bucket = f.bucket ?: return@mapNotNull null
-            LearnedInfo(id, nameOf(id), bucket.key, bucket.label, f.multiplier, f.ratings)
+            LearnedInfo(id, nameOf(id), bucket.key, bucket.label, f.multiplier, f.ratings, f.implicit)
         }
         val techniques = registry.strategies.map { s ->
             TechniqueInfo(s.id, s.displayName, s.description, DjCustomization.recipeIdOf(s.id) != null, s.params)
@@ -173,6 +173,11 @@ class CustomizationImpl(
     }
 
     private suspend fun republish() = withContext(Dispatchers.IO) { publish(currentPrefs()) }
+
+    /** The learned preferences changed outside this class (a skip was recorded): publish them. */
+    fun learnedChanged() {
+        scope.launch(Dispatchers.IO) { publish(currentPrefs()) }
+    }
 
     // ================================================================================================ styles
 

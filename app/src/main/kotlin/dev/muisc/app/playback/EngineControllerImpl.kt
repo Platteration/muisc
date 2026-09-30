@@ -16,6 +16,7 @@ import dev.muisc.player.RenderGate
 import dev.muisc.player.SinkPump
 import dev.muisc.player.SystemClock
 import dev.muisc.player.TransitionCoordinator
+import dev.muisc.player.TransitionSkip
 import dev.muisc.transitions.DefaultPairAnalyzer
 import dev.muisc.transitions.PlaybackContext
 import dev.muisc.transitions.PlaybackProgram
@@ -88,6 +89,8 @@ class EngineControllerImpl(
     private val onSongStarted: ((Song, PlaybackContext) -> Unit)? = null,
     /** The user's style and active presets, applied to the stored prefs before the engine sees them. */
     private val shaper: PrefsShaper = PrefsShaper.IDENTITY,
+    /** Skips the coordinator attributes to a rendered transition ("learn from skips"); called on its thread. */
+    onTransitionSkipped: ((TransitionSkip) -> Unit)? = null,
 ) : EngineController, DuckableEngine {
 
     private val appContext: Context = context.applicationContext
@@ -132,6 +135,7 @@ class EngineControllerImpl(
         pairAnalyzer = DefaultPairAnalyzer(),
         windows = windows,
         seed = 0L,
+        onTransitionSkipped = onTransitionSkipped,
     )
 
     /** Queue bookkeeping, state publishing and persistence (never the audio thread). */
@@ -265,10 +269,13 @@ class EngineControllerImpl(
         }
         if (snapshot.index >= snapshot.songs.size - 1) {
             if (snapshot.repeat == RepeatMode.ALL) {
+                // Before the wrap re-installs the queue, so the coordinator still sees where the listener skipped from.
+                coordinator.noteUserSkip()
                 queue.skipTo(0)
                 install(true, restart = true)
             } else {
-                player.submit(EngineCommand.Skip)
+                // Through the coordinator (a plain skip), so a skip of the transition into the last song still counts.
+                coordinator.onUserSkip(plain = true)
             }
             return
         }

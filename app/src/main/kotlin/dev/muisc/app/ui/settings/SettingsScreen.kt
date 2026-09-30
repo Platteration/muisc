@@ -248,6 +248,15 @@ private fun TransitionsSection(prefs: TransitionPrefs, uiPrefs: UiPrefs?, vm: Se
             },
             enabled = prefs.enabled,
         )
+        if (uiPrefs != null) {
+            SwitchRow(
+                title = stringResource(R.string.settings_learn_from_skips),
+                subtitle = stringResource(R.string.settings_learn_from_skips_body),
+                checked = uiPrefs.learnFromSkips,
+                onChecked = { on -> vm.updateUi { it.copy(learnFromSkips = on) } },
+                enabled = prefs.enabled,
+            )
+        }
         SliderRow(
             title = stringResource(R.string.settings_max_stretch),
             value = prefs.maxStretchPercent.toFloat(),

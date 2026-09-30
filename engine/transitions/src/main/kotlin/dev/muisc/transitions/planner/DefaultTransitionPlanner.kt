@@ -169,7 +169,7 @@ class DefaultTransitionPlanner(
                 strategyId = id, subScores = sub, fit = fit, weight = weight, energyPref = energyPref, variety = variety,
                 modifierBonus = modifierBonus, jitter = jitter, score = score,
                 modifiers = attached.entries.associate { (m, v) -> m.id to v }, reasons = app.reasons, blockers = app.blockers,
-                learned = learned.multiplier, learnedNote = if (learned.ratings > 0) learned.describe() else null,
+                learned = learned.multiplier, learnedNote = if (learned.isLearned) learned.describe() else null,
                 pinned = pinned, pinNote = if (pinned) pinText(pin!!) else null, presetNote = presetNote,
             )
             val explained = Applicability(app.score, reasons = app.reasons + breakdown.lines(), blockers = app.blockers)

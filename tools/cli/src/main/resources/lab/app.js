@@ -1131,7 +1131,7 @@
   async function loadRatings() {
     const r = await api('GET', '/api/ratings');
     $('ratings-formula').textContent = `${r.formula}; up = 1, down = 0. Weights stay within ×0.5…×1.5.`;
-    table($('ratings-table'), ['Strategy', 'Context', 'Ratings', 'Mean', 'Weight'], r.ratings.map((x) => [x.strategy, x.bucket, String(x.n), fmt(x.mean, 2), `×${fmt(x.weight, 2)}`]));
+    table($('ratings-table'), ['Strategy', 'Context', 'Ratings', 'Mean', 'Skips', 'Weight'], r.ratings.map((x) => [x.strategy, x.bucket, String(x.n), fmt(x.mean, 2), String(x.skips ?? 0), `×${fmt(x.weight, 2)}`]));
   }
 
   // ---- strategies & styles -------------------------------------------------------------------------------------------------

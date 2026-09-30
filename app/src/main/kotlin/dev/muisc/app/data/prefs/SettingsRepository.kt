@@ -40,6 +40,11 @@ data class UiPrefs(
     val analyseOnlyWhileCharging: Boolean = true,
     /** Skip the transition between consecutive tracks of the same album inside a playlist. */
     val keepAlbumFlowInPlaylists: Boolean = false,
+    /**
+     * A transition the listener skips (during it, or just after B takes over) counts as a weak thumbs-down for that
+     * technique in that kind of pair ([dev.muisc.player.TransitionCoordinator], [dev.muisc.app.playback.SkipFeedback]).
+     */
+    val learnFromSkips: Boolean = true,
 )
 
 /** Bookkeeping for incremental MediaStore scans (not user-facing). */
@@ -92,6 +97,7 @@ class SettingsRepository(context: Context) {
             p[Keys.BLACKLIST] = next.blacklist
             p[Keys.ANALYSE_ONLY_WHILE_CHARGING] = next.analyseOnlyWhileCharging
             p[Keys.KEEP_ALBUM_FLOW_IN_PLAYLISTS] = next.keepAlbumFlowInPlaylists
+            p[Keys.LEARN_FROM_SKIPS] = next.learnFromSkips
         }
     }
 
@@ -128,6 +134,7 @@ class SettingsRepository(context: Context) {
             blacklist = this[Keys.BLACKLIST] ?: d.blacklist,
             analyseOnlyWhileCharging = this[Keys.ANALYSE_ONLY_WHILE_CHARGING] ?: d.analyseOnlyWhileCharging,
             keepAlbumFlowInPlaylists = this[Keys.KEEP_ALBUM_FLOW_IN_PLAYLISTS] ?: d.keepAlbumFlowInPlaylists,
+            learnFromSkips = this[Keys.LEARN_FROM_SKIPS] ?: d.learnFromSkips,
         )
     }
 
@@ -157,6 +164,7 @@ class SettingsRepository(context: Context) {
         val BLACKLIST = stringSetPreferencesKey("library.blacklist")
         val ANALYSE_ONLY_WHILE_CHARGING = booleanPreferencesKey("analysis.onlyWhileCharging")
         val KEEP_ALBUM_FLOW_IN_PLAYLISTS = booleanPreferencesKey("transitions.keepAlbumFlowInPlaylists")
+        val LEARN_FROM_SKIPS = booleanPreferencesKey("dj.learnFromSkips")
         val TRANSITION_PREFS_JSON = stringPreferencesKey("transitions.prefsJson")
         val SCAN_GENERATION = longPreferencesKey("scan.generation")
         val SCAN_DATE_MODIFIED = longPreferencesKey("scan.dateModifiedSec")

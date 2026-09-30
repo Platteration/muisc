@@ -61,6 +61,13 @@ import kotlin.math.min
  * and more than 8 bars remain, else a live transition from now; [onUserSeek] drops a render the seek jumps past;
  * [setPowerMode] restricts the ladder (SAVER: live-capable strategies only; STRICT_SAVER: no transitions);
  * [onTrimMemory] swaps the next render for a live plan.
+ *
+ * Implicit feedback: a skip ([onUserSkip], [noteUserSkip]) while a planned, rendered transition is playing, or
+ * within [SKIP_SIGNAL_WINDOW_SEC] of B's body after it, is reported to [onTransitionSkipped] as a [TransitionSkip]
+ * (weak evidence against that strategy for that pair; the host decides whether to record it). Never reported: a
+ * skip later in B (it is about the song), album and single-track playback, live fallbacks (the planner's choice was
+ * not what played), a transition the listener reached with a DJ skip (they were already leaving A), and a second
+ * skip of the same transition: at most one report per (A, B, strategy) for the coordinator's lifetime.
  */
 class TransitionCoordinator(
     val planner: TransitionPlanner,
@@ -78,6 +85,8 @@ class TransitionCoordinator(
     /** Decoded windows for the full [RenderGate] check; without it the gate's cheap report check is used. */
     val windows: TrackAudioLoader? = null,
     val seed: Long = 0L,
+    /** Called on [scope] for each skip attributed to a rendered transition (see the class comment); must not block. */
+    val onTransitionSkipped: ((TransitionSkip) -> Unit)? = null,
 ) {
     private val _state = MutableStateFlow<Map<Int, CoordinatorState>>(emptyMap())
 
@@ -104,6 +113,10 @@ class TransitionCoordinator(
     private var driverJob: Job? = null
     private var previousStrategyId: String? = null
     private var renderEstimateMs = DEFAULT_RENDER_ESTIMATE_MS
+    /** (A, B, strategy) keys of the transitions already reported to [onTransitionSkipped], least recent first. */
+    private val skipReported = object : LinkedHashMap<String, Unit>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>): Boolean = size > MAX_SKIP_REPORT_KEYS
+    }
     private val retained = object : LinkedHashMap<String, RenderedTransition>(8, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, RenderedTransition>): Boolean = size > limits.maxRenderedAlive
     }
@@ -135,6 +148,8 @@ class TransitionCoordinator(
         var installed: Segment? = null
         var liveGraph: LiveGraph? = null
         var forceLive: String? = null
+        /** The listener reached this edge's transition with a DJ skip: no implicit feedback for it. */
+        var djSkipped = false
         val a: TrackRef get() = refs[index]!!
         val b: TrackRef get() = refs[index + 1]!!
         val isDone: Boolean get() = state is CoordinatorState.Gated || state is CoordinatorState.Failed || installed is Segment.Live
@@ -158,7 +173,24 @@ class TransitionCoordinator(
         }
     }
 
-    fun onUserSkip() { scope.launch { userSkip() } }
+    /** "Next": a DJ skip, a live move or a plain skip (see the class comment); [plain] always skips plainly. */
+    fun onUserSkip(plain: Boolean = false) {
+        scope.launch {
+            noteSkip()
+            if (plain) {
+                player.submit(EngineCommand.Skip)
+                log("skip: plain skip")
+            } else {
+                userSkip()
+            }
+        }
+    }
+
+    /**
+     * Tells the coordinator the listener skipped when the host moves on by itself (a wrap to the start of the queue):
+     * only the implicit feedback of [onUserSkip], nothing is submitted. Call it before the host's own change.
+     */
+    fun noteUserSkip() { scope.launch { noteSkip() } }
 
     fun onUserSeek(frame: Long) { scope.launch { userSeek(frame) } }
 
@@ -571,6 +603,49 @@ class TransitionCoordinator(
 
     // ================================================================================================ user actions
 
+    /**
+     * Reports the implicit feedback of a skip about to happen, from where the player is now (see the class comment).
+     * Runs before the skip is submitted, so the position is the one the listener skipped from.
+     */
+    private fun noteSkip() {
+        val listener = onTransitionSkipped ?: return
+        if (context == PlaybackContext.ALBUM || context == PlaybackContext.SINGLE) return
+        val pos = player.position
+        val here = mirror.getOrNull(pos.segmentIndex) ?: return
+        val transition: Entry
+        val phase: TransitionSkip.Phase
+        var secondsAfter = 0.0
+        if (!here.isBody) {
+            transition = here
+            phase = TransitionSkip.Phase.DURING
+        } else {
+            val before = mirror.getOrNull(pos.segmentIndex - 1) ?: return
+            val body = here.segment as? Segment.Body ?: return
+            if (before.isBody || before.queueIndex != here.queueIndex - 1 || pos.nowPlaying?.id != body.track.id) return
+            val framesIntoB = pos.trackFrame - body.fromFrame
+            if (framesIntoB > secondsToFrames(SKIP_SIGNAL_WINDOW_SEC)) return
+            transition = before
+            phase = TransitionSkip.Phase.JUST_AFTER
+            secondsAfter = max(0L, framesIntoB) / sampleRate.toDouble()
+        }
+        val seg = transition.segment as? Segment.Rendered ?: return // a live fallback: not the planner's choice
+        val e = edges[transition.queueIndex] ?: return
+        if (e.installed != seg || e.djSkipped) return
+        val features = e.features ?: return
+        val strategyId = seg.rendered.plan.strategyId
+        val key = retainKey(e.a, e.b) + " " + strategyId
+        if (skipReported.containsKey(key)) return
+        skipReported[key] = Unit
+        val skip = TransitionSkip(e.a.id, e.b.id, strategyId, features, phase, secondsAfter)
+        val where = if (phase == TransitionSkip.Phase.DURING) "during" else "${"%.1f".format(secondsAfter)} s after"
+        log("edge ${e.index}: skip $where $strategyId, reported as implicit feedback")
+        try {
+            listener(skip)
+        } catch (t: Throwable) {
+            log("edge ${e.index}: implicit feedback failed: ${t.message}")
+        }
+    }
+
     private fun userSkip() {
         val ci = currentIndex
         val e = edges[ci]
@@ -589,6 +664,7 @@ class TransitionCoordinator(
                 var target = r.plan.aExitFrame - barsToFrames(e.a, 4)
                 target = snapToDownbeat(e.a, target)
                 player.submit(EngineCommand.Seek(max(aNow, target)))
+                e.djSkipped = true
                 log("edge $ci: DJ skip to frame $target (${r.plan.strategyId} render)")
                 publishState()
                 return
@@ -713,6 +789,9 @@ class TransitionCoordinator(
         const val SKIP_LEAD_SEC = 0.25
         const val SKIP_FADE_SEC = 1.5
         const val REPLAN_MIN_SEC = 20.0
+        /** A skip this long into B's body after a rendered transition still counts against the transition. */
+        const val SKIP_SIGNAL_WINDOW_SEC = 20.0
+        private const val MAX_SKIP_REPORT_KEYS = 256
         const val SEGUE_SILENCE_SEC = 0.05
         const val QUEUE_DEBOUNCE_MS = 500L
         const val DEFAULT_RENDER_ESTIMATE_MS = 5000.0

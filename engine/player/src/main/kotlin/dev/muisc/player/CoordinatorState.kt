@@ -2,6 +2,7 @@ package dev.muisc.player
 
 import dev.muisc.analysis.model.TrackAnalysis
 import dev.muisc.audio.AudioSourceId
+import dev.muisc.transitions.PairFeatures
 import dev.muisc.transitions.RenderedTransition
 import dev.muisc.transitions.TransitionInput
 
@@ -17,6 +18,28 @@ sealed interface CoordinatorState {
 }
 
 enum class PowerMode { NORMAL, SAVER, STRICT_SAVER }
+
+/**
+ * A skip the coordinator attributes to the planned, rendered transition from [aId] into [bId] with [strategyId]
+ * (implicit feedback; see [TransitionCoordinator]). [features] are the pair's, as the planner saw them.
+ */
+data class TransitionSkip(
+    val aId: String,
+    val bId: String,
+    val strategyId: String,
+    val features: PairFeatures,
+    val phase: Phase,
+    /** How far into B's body the skip came, seconds ([Phase.JUST_AFTER]); 0 during the transition. */
+    val secondsAfter: Double,
+) {
+    enum class Phase {
+        /** While the transition itself was playing. */
+        DURING,
+
+        /** Within [TransitionCoordinator.SKIP_SIGNAL_WINDOW_SEC] of B's body after the transition. */
+        JUST_AFTER,
+    }
+}
 
 /** Supplies analyses (cache first; `urgent` = needed for the current pair, run now on the coordinator thread). */
 interface AnalysisService {

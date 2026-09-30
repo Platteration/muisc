@@ -354,6 +354,34 @@ class DjCustomizationTest {
         assertEquals(emptyList(), DjCustomization(dir).learned(), "the reset survives a restart")
     }
 
+    /**
+     * A reset and a rating saved at the same moment in the same process (the Learned screen's "Forget" while the Lab
+     * or a skip records): the reset runs under the store's lock, so no rating is lost and no forgotten one comes back.
+     * Not deterministic by construction (it races two threads); against the reset that moved and rewrote the file
+     * outside the lock it lost ratings in every run tried (see the PR).
+     */
+    @Test
+    fun resetLearnedNeitherLosesNorResurrectsARatingSavedAtTheSameMoment() {
+        val dir = tempDir()
+        val dj = DjCustomization(dir)
+        val (a, b) = pair()
+        val features = DefaultPairAnalyzer().features(a.analysis, b.analysis, TransitionPrefs())
+        val bucket = ContextBucket.of(features)
+        val rounds = 200
+        val start = java.util.concurrent.CountDownLatch(1)
+        val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+        fun worker(body: () -> Unit) = Thread { try { start.await(); body() } catch (t: Throwable) { failures += t } }.also { it.start() }
+        val recorder = worker { repeat(rounds) { dj.record("bassSwap", features, Rating.Up) } }
+        val resetter = worker { repeat(rounds) { dj.record("crossfade", features, Rating.Down); dj.resetLearned("crossfade") } }
+        start.countDown()
+        recorder.join(60_000); resetter.join(60_000)
+        assertEquals(emptyList(), failures.toList())
+        val onDisk = DjCustomization(dir)
+        assertEquals(rounds, onDisk.planner.current.customization.learner!!.tally("bassSwap", bucket).n, "no rating lost")
+        assertEquals(0, onDisk.planner.current.customization.learner!!.tally("crossfade", bucket).n, "no forgotten rating back")
+        assertEquals(rounds, dj.planner.current.customization.learner!!.tally("bassSwap", bucket).n)
+    }
+
     // ---------------------------------------------------------------------------------------------------- presets
 
     @Test

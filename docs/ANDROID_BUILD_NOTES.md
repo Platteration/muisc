@@ -270,9 +270,10 @@ What is wired, and how (the code is in `playback/DjCustomization.kt`, `playback/
   `builtInRecipesLoadThroughTheClassLoaderAndJoinTheRegistry` proves the same code path on the JVM.
 * **Planner** = the engine's `DefaultTransitionPlanner` with a `PlannerCustomization` built from the profile:
   presets (built-in + `presets/`), pins (the in-memory one-off override first, then `pins.json`) and the
-  learned multipliers (`feedback.json`). It sits behind `DjPlanner` so "Forget ratings" can swap in a planner
-  over a fresh learner (the engine's `FeedbackLearner` cannot be emptied in place). The previous ratings file
-  is kept as `feedback.json.bak`.
+  learned multipliers (`feedback.json`). It sits behind `DjPlanner`. "Forget ratings" is
+  `FileFeedbackStore.reset`: a read-modify-write under the same file lock as a rating, which empties the
+  store's learner in place (the planner holds that learner), so a rating or skip saved at the same moment is
+  neither lost nor brought back. The previous ratings file is kept as `feedback.json.bak`.
 * **Prefs shaping.** The chosen style (`StyleProfile.apply`) and then every active preset
   (`PresetResolution.fold`) reshape the stored `TransitionPrefs` at the engine boundary only — in
   `EngineControllerImpl` and in `TransitionLabImpl` — the same order the CLI uses for `--style`. The stored
@@ -295,6 +296,14 @@ What is wired, and how (the code is in `playback/DjCustomization.kt`, `playback/
   preferences; the Lab's blind A/B test renders two candidates, plays them as X and Y, and records up for the
   winner and down for the other. The Lab's "Pin for this pair" now also writes an engine pin (identity-keyed)
   into `pins.json`, so it steers playback; it still writes the Room `PairOverride` as before.
+* **Learn from skips** (Settings → Transitions, on by default). `TransitionCoordinator` reports a skip ("Next")
+  made while a planned, rendered transition plays, or within 20 s of B's body after it, as a `TransitionSkip`;
+  `SkipFeedback` records it through `DjCustomization.recordSkip` → `FileFeedbackStore.recordImplicit` (same
+  lock as ratings) when the toggle is on. Never counted: album and single-track playback, live fallbacks, a
+  transition reached with a DJ skip, a skip later in B, and the same (A, B, technique) a second time while the
+  service lives. A skip weighs a quarter of a thumbs-down and skips alone never take a technique below ×0.83
+  (`FeedbackLearner.IMPLICIT_WEIGHT`, `IMPLICIT_CAP`). A `feedback.json` holding skips is written as version 2
+  (`implicitN`, `implicitSum` per bucket); engines from before this change cannot read it.
 * **Safety nets.** Nothing about customization can stop the service from starting: every file is read with
   the engine's skip-and-report loaders, and the problems are listed at the top of every DJ screen. Importing
   never overwrites one of the user's recipes without asking, keeps a recipe with errors only when the user says
@@ -327,7 +336,10 @@ and black themes, with dynamic colour on and off, at the default and the largest
    once the engine is installed; the eight built-in presets are always there after that).
 6. **Pinned pairs**: empty state; a pin made in the Lab (labels "Title — Artist → …"); remove confirm.
 7. **Learned preferences**: empty; after several Lab ratings (multipliers above and below 1, counts);
-   Forget one technique; Forget all (confirm); the `feedback.json.bak` backup exists afterwards.
+   after skips ("n ratings · m skips", "1 skip"); Forget one technique; Forget all (confirm); the
+   `feedback.json.bak` backup exists afterwards. **Learn from skips**: skip during a transition in a playlist
+   and check a skip appears for that technique; skip 30 s into the next song, or in an album, and check none
+   does; switch it off and check none does.
 8. **Now Playing → Next transition sheet**: loading; the ranked list with scores, reasons (Why?/Less), the
    "Recipe", "Planned now" and "Your pick" tags; picking a technique (progress, snackbar, the queue badge
    changes to the new plan); "Let Muisc choose"; a gated pair (album playback: picking disabled, reason

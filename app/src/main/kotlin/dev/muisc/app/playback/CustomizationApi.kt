@@ -86,6 +86,8 @@ data class LearnedInfo(
     val bucketLabel: String,
     val multiplier: Double,
     val ratings: Int,
+    /** Skipped transitions behind [multiplier] (implicit feedback), counted apart from [ratings]. */
+    val skips: Int = 0,
 )
 
 /** A technique id with its display name (for pickers). */
