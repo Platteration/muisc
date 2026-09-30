@@ -52,6 +52,26 @@ class RecipeRenderModesTest {
         T.assertAligned("A kicks", T.kickAlignment(aOnly.out, 0 until 16, pair.a.audio, T.beatFrames(pair.a, 16, 32)))
     }
 
+    /**
+     * `align`: A's mix-out cue on the synthetic fixture is bar 12 (beat 48), which is not a phrase start (phrases are
+     * 8 bars from bar 0). `phrase` starts the transition at the phrase start before it (beat 32), `downbeat` on the cue
+     * itself — in both tempo families.
+     */
+    @Test
+    fun alignChoosesAPhraseStartOrTheDownbeatAtTheCue() {
+        val pair = RecipeRenderTestSupport.near
+        assertEquals(48, pair.a.analysis.cues.mixOutBeat)
+        for (tempo in listOf(RecipeTempo.MATCH, RecipeTempo.NONE)) {
+            for ((align, beat) in listOf(RecipeAlign.PHRASE to 32, RecipeAlign.DOWNBEAT to 48)) {
+                val rec = recipe("align", tempo, blend.first, blend.second, align = align)
+                val plan = RecipeStrategy(rec).plan(pair.a.analysis, pair.b.analysis, pair.features, dev.muisc.transitions.Params.EMPTY, pair.prefs, 1L)
+                assertEquals(pair.a.analysis.grid.beatFrames[beat] - g, plan.aExitFrame, "$tempo / $align: A's bar 0 is its beat $beat")
+                if (tempo == RecipeTempo.MATCH) assertEquals(beat.toString(), plan.params[BeatDomain.PARAM_A_START_BEAT])
+                if (align == RecipeAlign.DOWNBEAT) assertTrue(plan.notes.any { it.startsWith("A starts on its downbeat 48, the nearest at or before its mixOutBeat 48") }, plan.notes.toString())
+            }
+        }
+    }
+
     @Test
     fun glideRecipeMovesTheMasterTempoAcrossTheOverlap() {
         val pair = RecipeRenderTestSupport.glidePair
