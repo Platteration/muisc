@@ -17,3 +17,9 @@ pre-approved; anything else needs a one-line request below and the lead's approv
 - `MlStemSeparator` interface added to `Stems.kt`.
 - `GaplessInfo` and `EngineStreamFactory` added to `AudioDecoder.kt`.
 - New modules `engine:metrics` and `engine:player` (empty until their work packages land).
+
+## Unreleased — user customization (presets, styles, pins, learned weights)
+
+- `TransitionPrefs`: added `activePresets: Map<String, String> = emptyMap()` (strategy id → preset id). Defaulted, so
+  existing JSON decodes unchanged; the JSON the app and CLI write gains an `activePresets` key when they encode
+  defaults. Not part of `RenderKey` (the preset's values reach the key through `plan.params`).
