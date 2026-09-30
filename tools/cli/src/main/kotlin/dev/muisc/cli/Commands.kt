@@ -22,6 +22,8 @@ fun allCommands(): List<CliktCommand> = listOf(
     StemsCommand(),      // stems   — pseudo-stem separation to four WAVs
     PlayCommand(),       // play    — play a WAV through the system device
     GoldensCommand.build(), // goldens check|update — golden-render regression
+    EvalCommand(),          // eval    — plan and render sampled pairs of a library into an HTML/CSV/JSON report
+    BenchCommand.build(),   // bench analysis — analysis accuracy on synthetic songs with known answers
     RecipeCommand.build(),  // recipe  — list, show, validate, create and plot user-authored transitions
     PresetCommand(),        // preset  — named parameter sets for a strategy
     StyleCommand(),         // style   — listening styles that reshape the preferences (--style)

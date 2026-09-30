@@ -11,6 +11,9 @@ muisc ab fixtures/t120C.wav fixtures/t126Am.wav --all -o ab/
 muisc check set.wav
 ```
 
+These are numbers for the synthetic fixtures only. To score the planner's picks on your own music use
+`muisc eval`; for the golden-render regression and the analysis accuracy bench, see `docs/TESTING.md`.
+
 ## What the metrics mean
 
 | Metric | Meaning | Fails at |

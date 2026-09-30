@@ -89,6 +89,17 @@ muisc goldens update                                 # accept new goldens after 
 
 See `docs/QUALITY.md` for what each metric means, its thresholds, and the failures that are currently open.
 
+```
+muisc eval ~/Music/ --pairs 60 -o eval/          # sample pairs of a library, plan, render, metrics: report.html + CSV/JSON
+muisc eval ~/Music/ --fail-on 10% --worst 20     # exit non-zero when more than 10 % of the renders FAIL a metric
+muisc bench analysis --songs 24 --all            # tempo/beat/downbeat/key/trim accuracy on synthetic songs
+```
+
+`eval` is how a change is judged against your own music rather than the synthetic fixtures: every worst render in
+the report comes with the `muisc render` command that reproduces it. `bench analysis` measures the analyzer against
+songs with known answers. See `docs/TESTING.md` for both, and for the golden corpus that covers every strategy and
+built-in recipe.
+
 ## Other
 
 ```
