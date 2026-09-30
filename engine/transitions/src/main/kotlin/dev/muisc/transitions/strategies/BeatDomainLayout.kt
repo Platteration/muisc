@@ -77,6 +77,13 @@ object BeatDomain {
     const val PARAM_B_START_BEAT = "geom.bStartBeat"
     const val PARAM_OVERLAP_BEATS = "geom.overlapBeats"
 
+    /**
+     * Master beats of a strategy that builds its own master grid instead of this object's layout
+     * ([StemSwapStrategy], [DrumBreakBridgeStrategy]): its windows, B's entry and every swap position are sized in
+     * beats of that body, so the tempo-glide modifier fits its glide into exactly this many beats.
+     */
+    const val PARAM_BODY_BEATS = "geom.bodyBeats"
+
     /** `grid.stretchMode` = [STRETCH_KEY_LOCK] | [STRETCH_VINYL] (written by the tempo-glide modifier; absent = prefs.keyLock). */
     const val PARAM_STRETCH_MODE = "grid.stretchMode"
     const val STRETCH_KEY_LOCK = "keyLock"

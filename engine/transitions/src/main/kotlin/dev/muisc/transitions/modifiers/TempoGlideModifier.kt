@@ -33,7 +33,10 @@ import kotlin.math.min
  * **How it works.** [adjustPlan] rewrites the `grid.*` params (`grid.mode = glide`, `grid.preBars = 0`,
  * `grid.glideBars`, `grid.holdBars`, `grid.curve`, `grid.stretchMode`) and, for plans that publish the
  * [BeatDomain] geometry (`geom.*`), rebuilds every frame position through [BeatDomain.resolveLayout], so windows
- * and `expectedOutputFrames` follow the new grid. The base strategy's `PhaseLockedDeck`s read the same grid via
+ * and `expectedOutputFrames` follow the new grid. Strategies that build their own master grid (`stemSwap`,
+ * `drumBreakBridge`, which publish [BeatDomain.PARAM_BODY_BEATS] instead) keep their body: the glide is fitted
+ * into its bars (`grid.preBars` at A's tempo first when it is shorter), so their windows stay valid and only
+ * `expectedOutputFrames` changes. The base strategy's `PhaseLockedDeck`s read the same grid via
  * [MasterGrid.fromPlan] and follow it; nothing else changes. [apply] only adds the `masterBpm` lane (if missing)
  * and "glide start" / "glide end" markers — the audio is already rendered on the glide. B plays on every master beat,
  * so a glide longer than B's music after its entry would render silence: [adjustPlan] shortens `glideBars` to what B
@@ -50,8 +53,8 @@ import kotlin.math.min
  * vinyl (resampling, pitch follows tempo — the honest turntable sound, pitch drifts with the glide).
  *
  * **Failure modes.** WSOLA phasiness on sustained material when the instantaneous ratio exceeds ~8 %; the planner
- * caps the total change at 16 % and prefers longer glides for bigger changes. A base plan without `geom.*` keeps
- * its windows: only the grid params are written and a note says so.
+ * caps the total change at 16 % and prefers longer glides for bigger changes. A base plan with neither the
+ * [BeatDomain] geometry nor a body length keeps its windows: only the grid params are written and a note says so.
  */
 class TempoGlideModifier : TransitionModifier {
     /** Parameters. */
@@ -78,6 +81,9 @@ class TempoGlideModifier : TransitionModifier {
 
     override fun adjustPlan(plan: TransitionPlan, a: TrackAnalysis, b: TrackAnalysis, features: PairFeatures, params: Params, prefs: TransitionPrefs): TransitionPlan {
         val p = P.resolve(params, prefs)
+        if (!BeatDomain.hasGeometry(plan)) {
+            plan.params[BeatDomain.PARAM_BODY_BEATS]?.toIntOrNull()?.let { return glideInsideBody(plan, it, a, b, features, p, prefs) }
+        }
         val holdBars = p.int(P.holdBars)
         val curve = p.choice(P.curve)
         val extraNotes = ArrayList<String>()
@@ -103,6 +109,39 @@ class TempoGlideModifier : TransitionModifier {
         // The base strategy re-derives its own lanes at render time from the plan; only the grid lanes are known here.
         val kept = plan.lanes.filter { it.id != BeatDomain.LANE_MASTER_BEAT && it.id != BeatDomain.LANE_MASTER_BPM }
         return layout.applyTo(withGrid, kept).copy(notes = plan.notes + note + extraNotes + "windows and length re-derived for the glide grid: ${layout.describe()}")
+    }
+
+    /**
+     * The glide for a strategy that builds its own master grid ([BeatDomain.PARAM_BODY_BEATS]: `stemSwap`,
+     * `drumBreakBridge`). Such a plan has already fitted its body to both songs and sized its windows, B's entry and
+     * every swap position in beats of that body, and it renders on [MasterGrid.fromPlan] once `grid.mode = glide`, so
+     * the glide grid must have exactly as many beats: `preBars + glideBars + holdBars` = the body's bars (whole bars:
+     * both strategies build their body from bars). The hold is kept (at most all but one bar), the glide shortened to
+     * what is left when it does not fit, and A's tempo held for any bars before it. A beat keeps its frame in both
+     * songs, so the windows and B's entry stay valid; only the output length follows the new grid.
+     */
+    private fun glideInsideBody(plan: TransitionPlan, bodyBeats: Int, a: TrackAnalysis, b: TrackAnalysis, features: PairFeatures, p: Params, prefs: TransitionPrefs): TransitionPlan {
+        val bodyBars = bodyBeats / a.grid.beatsPerBar.coerceAtLeast(1)
+        val holdBars = min(p.int(P.holdBars), bodyBars - 1)
+        val glideBars = min(p.int(P.glideBars), bodyBars - holdBars)
+        val preBars = bodyBars - glideBars - holdBars
+        val curve = p.choice(P.curve)
+        val withGrid = plan.copy(
+            params = plan.params
+                .with(MasterGrid.PARAM_MODE, MasterGrid.MODE_GLIDE)
+                .with(MasterGrid.PARAM_PRE_BARS, preBars)
+                .with(MasterGrid.PARAM_GLIDE_BARS, glideBars)
+                .with(MasterGrid.PARAM_HOLD_BARS, holdBars)
+                .with(MasterGrid.PARAM_CURVE, curve)
+                .with(BeatDomain.PARAM_STRETCH_MODE, p.choice(P.mode)),
+            modifiers = if (ID in plan.modifiers) plan.modifiers else plan.modifiers + ID,
+        )
+        val grid = MasterGrid.fromPlan(withGrid, a, b, features, prefs)
+        val bpmA = BeatDomain.bpmOf(a)
+        val notes = plan.notes + "tempo glide ${"%.1f".format(bpmA)} -> ${"%.1f".format(bpmA * features.tempoRatio)} BPM over $glideBars bars ($curve), hold $holdBars bars at B's tempo, ${p.choice(P.mode)}" +
+            (if (glideBars < p.int(P.glideBars) || holdBars < p.int(P.holdBars)) listOf("glide fitted to the $bodyBars-bar body: ${p.int(P.glideBars)} + ${p.int(P.holdBars)} bars requested") else emptyList()) +
+            "windows unchanged: the glide grid keeps the base plan's $bodyBars bars ($preBars at A's tempo, $glideBars gliding, $holdBars held), ${"%.2f".format(grid.totalFrames / prefs.sampleRate.toDouble())} s body"
+        return withGrid.copy(expectedOutputFrames = (2L * Splice.GUARD_FRAMES + grid.totalFrames).toInt(), notes = notes)
     }
 
     /**

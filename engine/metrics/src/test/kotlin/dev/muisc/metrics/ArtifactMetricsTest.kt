@@ -97,6 +97,98 @@ class ArtifactMetricsTest {
         }
     }
 
+    // ---- level jumps in a beat-domain render ------------------------------------------------------------
+
+    private val blend by lazy { MetricsFixtures.beatMatchedBlend() }
+
+    /** Output frames of the render's master beats, from the `masterBeat` lane. */
+    private fun masterBeatFrames(case: MetricsFixtures.Case): IntArray {
+        val points = case.rendered.plan.lanes.first { it.id == ArtifactMetrics.MASTER_BEAT_LANE }.points
+        return IntArray(points.size) { Math.round(points[it].outputSec * case.audio.sampleRate).toInt() }
+    }
+
+    /**
+     * Regression for QUALITY.md known failure 3 (`levelJumpDb` 24-29 dB on every long beat-domain blend). A
+     * beat-domain render time-stretches its decks onto the master grid, so the splice contract's constant offsets
+     * put the sources' onsets where the render does not play them - here B, stretched 5 % onto A's grid, is off by
+     * up to 82 ms through the settle glide - and the kick on every master beat, a 20-40 dB rise out of the gap
+     * before it in both sources, was scored as a level jump (20.2 dB on this render; 5.95 dB once the kicks are
+     * excused, a rise in B's own material during the hold). Every kick the render plays on a master beat must have
+     * a mapped source onset within the click check's own 5 ms guard.
+     */
+    @Test
+    fun beatDomainSourceOnsetsLandOnTheKicksTheRenderPlays() {
+        val onsets = ArtifactMetrics.sourceOnsetsInOutput(blend.rendered, blend.input)
+        val renderOnsets = Signals.onsetFrames(blend.audio)
+        val tight = Signals.msFrames(ArtifactMetrics.ONSET_GUARD_MS, sr)
+        val kicks = masterBeatFrames(blend).toList().mapNotNull { beat -> renderOnsets.minByOrNull { abs(it - beat) }?.takeIf { abs(it - beat) <= tight } }
+        assertTrue(kicks.size >= 40, "the render plays a kick on (nearly) every one of its ${masterBeatFrames(blend).size} master beats: ${kicks.size}")
+        val missed = kicks.filter { !ArtifactMetrics.nearAny(onsets, it, tight) }
+        assertEquals(emptyList(), missed.map { "%.3f s".format(it.toDouble() / sr) }, "kicks with no mapped source onset within ${ArtifactMetrics.ONSET_GUARD_MS} ms")
+    }
+
+    /**
+     * The mapping fix must not have made the level check blind inside a beat-domain segment.
+     *
+     * It moves exclusions, it does not add them: the beat map excuses fewer of the render's window boundaries than
+     * the constant offsets did (A's and B's kicks now land on the same master beats instead of on two). A sustained
+     * gain step injected where B is time-stretched is read at the boundary where it is, over the boundaries within
+     * 100 ms of it - the whole render's maximum cannot show a 6 dB step here, because it already holds a 5.95 dB rise
+     * of B's own (see above) and the statistic reads a 6 dB step in percussive material as 1-6 dB (see
+     * [ArtifactMetrics.levelJumpDb]). Swept every 50 ms over the stretched body, at least as many steps are graded
+     * WARN (6 dB) and FAIL (10 dB) with the beat map as with the constant offsets; and at the onset-free frame
+     * nearest the middle of the render - the rule the crossfade test uses - a 6 dB step WARNs and a 10 dB step FAILs.
+     */
+    @Test
+    fun aLevelStepInsideABeatDomainBlendIsStillDetected() {
+        val audio = blend.audio
+        val plan = blend.plan
+        val w = Signals.msFrames(ArtifactMetrics.LEVEL_WINDOW_MS, sr)
+        val guard = Signals.msFrames(ArtifactMetrics.LEVEL_ONSET_GUARD_MS, sr)
+        val onsets = ArtifactMetrics.sourceOnsetsInOutput(blend.rendered, blend.input)
+        val offsetMapped = (Signals.onsetFrames(blend.input.aAudio).map { it - plan.aExitOffset } +
+            Signals.onsetFrames(blend.input.bAudio).map { it + audio.frames - plan.bEntryOffset })
+            .filter { it in 0 until audio.frames }.sorted().toIntArray()
+        fun excused(ex: IntArray) = (0 until audio.frames / w).count { ArtifactMetrics.nearAny(ex, it * w, guard) }
+        assertTrue(excused(onsets) < excused(offsetMapped), "boundaries excused: beat map ${excused(onsets)}, constant offsets ${excused(offsetMapped)}")
+
+        val beats = masterBeatFrames(blend)
+        var warnWithBeatMap = 0; var warnWithOffsets = 0; var failWithBeatMap = 0; var failWithOffsets = 0
+        var frame = beats[4] / w * w
+        while (frame < beats[52]) {
+            if (localStepReading(audio, onsets, frame, 6.0) >= ArtifactMetrics.LEVEL_JUMP_WARN_DB) warnWithBeatMap++
+            if (localStepReading(audio, offsetMapped, frame, 6.0) >= ArtifactMetrics.LEVEL_JUMP_WARN_DB) warnWithOffsets++
+            if (localStepReading(audio, onsets, frame, 10.0) >= ArtifactMetrics.LEVEL_JUMP_FAIL_DB) failWithBeatMap++
+            if (localStepReading(audio, offsetMapped, frame, 10.0) >= ArtifactMetrics.LEVEL_JUMP_FAIL_DB) failWithOffsets++
+            frame += 5 * w
+        }
+        assertTrue(warnWithBeatMap > 0 && warnWithBeatMap >= warnWithOffsets,"6 dB steps graded WARN: beat map $warnWithBeatMap, constant offsets $warnWithOffsets")
+        assertTrue(failWithBeatMap >= failWithOffsets, "10 dB steps graded FAIL: beat map $failWithBeatMap, constant offsets $failWithOffsets")
+
+        val mid = MetricsFixtures.onsetFreeFrame(blend, audio.frames / 2, 80.0) / w * w
+        val clean = localStepReading(audio, onsets, mid, 0.0)
+        val six = localStepReading(audio, onsets, mid, 6.0)
+        val ten = localStepReading(audio, onsets, mid, 10.0)
+        assertTrue(clean < ArtifactMetrics.LEVEL_JUMP_WARN_DB, "clean render at ${mid.toDouble() / sr} s: $clean dB")
+        assertTrue(six >= ArtifactMetrics.LEVEL_JUMP_WARN_DB && six > clean, "a 6 dB step at ${mid.toDouble() / sr} s reads $six dB (clean $clean dB)")
+        assertTrue(ten >= ArtifactMetrics.LEVEL_JUMP_FAIL_DB, "a 10 dB step at ${mid.toDouble() / sr} s reads $ten dB")
+    }
+
+    /**
+     * [ArtifactMetrics.levelJumpDb] over the boundaries within 100 ms of the block-aligned [frame] of [audio], after
+     * everything from [frame] on has been multiplied by [db] - read on a 400 ms slice (block-aligned, so the block
+     * grid is the full buffer's) rather than on a copy of the whole render.
+     */
+    private fun localStepReading(audio: AudioBuffer, excluded: IntArray, frame: Int, db: Double): Double {
+        val w = Signals.msFrames(ArtifactMetrics.LEVEL_WINDOW_MS, sr)
+        val start = frame - 20 * w
+        val region = audio.slice(start, frame + 20 * w)
+        val gain = Math.pow(10.0, db / 20.0).toFloat()
+        for (ch in region.channels) for (i in 20 * w until region.frames) ch[i] *= gain
+        val shifted = IntArray(excluded.size) { excluded[it] - start }
+        return ArtifactMetrics.levelJumpDb(region, shifted, 10 * w, 30 * w)
+    }
+
     // ---- peaks, clipping, DC, NaN -----------------------------------------------------------------------
 
     @Test

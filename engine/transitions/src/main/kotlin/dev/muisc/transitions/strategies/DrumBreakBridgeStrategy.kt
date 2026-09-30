@@ -336,7 +336,7 @@ class DrumBreakBridgeStrategy : TransitionStrategy {
         const val LANE_B_DRUMS = "gainB.drums"; const val LANE_B_REST = "gainB.rest"
         const val LANE_HPF = "hpfA.drumsHz"
         private const val K_A_START = "geom.aStartBeat"; private const val K_B_START = "geom.bStartBeat"; private const val K_BREAK = "geom.breakBeats"
-        private const val K_HANDOVER = "geom.handoverBeat"; private const val K_HANDOVER_END = "geom.handoverEndBeat"; private const val K_BODY_BEATS = "geom.bodyBeats"
+        private const val K_HANDOVER = "geom.handoverBeat"; private const val K_HANDOVER_END = "geom.handoverEndBeat"; private const val K_BODY_BEATS = BeatDomain.PARAM_BODY_BEATS
         private const val K_SETTLE = "geom.settleBeats"
 
         /** Structure prior: a beat on either edge is what this bridge wants. */

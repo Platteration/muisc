@@ -9,6 +9,8 @@ import dev.muisc.transitions.strategies.BassSwapStrategy
 import dev.muisc.transitions.strategies.BeatDomain
 import dev.muisc.transitions.strategies.BeatMatchedBlendStrategy
 import dev.muisc.transitions.strategies.CrossfadeStrategy
+import dev.muisc.transitions.strategies.DrumBreakBridgeStrategy
+import dev.muisc.transitions.strategies.StemSwapStrategy
 import dev.muisc.transitions.strategies.BeatDomainTestSupport as T
 import kotlin.math.abs
 import kotlin.test.Test
@@ -149,5 +151,43 @@ class TempoGlideModifierTest {
         for (k in 32..35) assertEquals(60.0 / 132.0 * T.SR, periods[k].toDouble(), 1.0, "hold beat $k at B's tempo")
         assertEquals(1.0, rendered.report.ratioTrace.last().toDouble(), 0.002)
         T.assertAligned("vinyl B kicks", T.kickAlignment(rendered, 0 until 36, pair.b.audio, T.beatFrames(pair.b, 16, 80), toleranceMs = 4.0), maxMedianMs = 3.0)
+    }
+
+    /**
+     * `stemSwap` and `drumBreakBridge` build their own master grid and size their windows, B's entry and every swap
+     * in beats of that body (`geom.bodyBeats`), and they render on [MasterGrid.fromPlan] as soon as the modifier
+     * writes `grid.mode = glide`. That grid used to be `glideBars + holdBars` bars whatever the body was (the plans
+     * carry no `geom.overlapBeats`, so nothing was re-derived), and the render disagreed with its own plan: on the
+     * CLI's synthetic pairs a 48-beat grid over a 44-beat stemSwap body and a 72-beat grid over a 52-beat
+     * drumBreakBridge body ran B's deck past the end of its decoded window (1.5 s below -53 dB, 7.5 s of the texture
+     * bed alone) in segments 6.25 % and 41.6 % longer than planned, and a 72-beat grid over a 76-beat stemSwap body
+     * ended 2.8 % short and skipped a bar of B at the post-roll. The glide must fit the body instead: the render is
+     * as long as the plan says, it keeps the splice contract, every master beat of the body carries music, and B
+     * still ends at ratio 1.0.
+     */
+    @Test
+    fun strategiesWithTheirOwnGridKeepTheirBodyUnderAGlide() {
+        val within = T.pair(a120, T.song(126.0, 9, Mode.MINOR))
+        for (strategy in listOf(StemSwapStrategy(), DrumBreakBridgeStrategy())) {
+            val name = "${strategy.id} + tempoGlide"
+            val base = strategy.plan(within.a.analysis, within.b.analysis, within.features, Params.EMPTY, within.prefs, 1)
+            val bodyBeats = base.params[BeatDomain.PARAM_BODY_BEATS]!!.toInt()
+            val plan = modifier.adjustPlan(base, within.a.analysis, within.b.analysis, within.features, Params.EMPTY, within.prefs)
+            assertEquals(MasterGrid.MODE_GLIDE, plan.params[MasterGrid.PARAM_MODE], name)
+            assertEquals(base.aExitFrame, plan.aExitFrame, "$name: A's exit does not move")
+            assertEquals(base.bEntryFrame, plan.bEntryFrame, "$name: B's entry is in beats of the body, which does not change")
+            val input = within.input(plan)
+            val ctx = RenderContext(within.prefs, 1)
+            val rendered = modifier.apply(strategy.render(input, ctx), input, Params.EMPTY, ctx)
+            T.assertContract(name, plan, input, rendered)
+            val beats = T.masterBeatFrames(rendered)
+            assertEquals(bodyBeats, beats.size - 1, "$name: the glide grid has the body's beats")
+            val quietest = (0 until beats.size - 1).minOf { T.rmsDb(rendered.audio, beats[it], beats[it + 1]) }
+            assertTrue(quietest > -40.0, "$name: every master beat carries music (quietest beat $quietest dB)")
+            assertEquals(1.0, rendered.report.ratioTrace.last().toDouble(), 0.002, "$name: B ends at its own tempo")
+            val bpm = rendered.plan.lanes.first { it.id == BeatDomain.LANE_MASTER_BPM }.points
+            assertEquals(120.0, bpm.first().value, 0.01, "$name: the glide starts at A's tempo")
+            assertEquals(126.0, bpm.last().value, 0.01, "$name: and ends at B's")
+        }
     }
 }

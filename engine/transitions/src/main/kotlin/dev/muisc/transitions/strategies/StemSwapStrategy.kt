@@ -362,7 +362,7 @@ class StemSwapStrategy : TransitionStrategy {
         const val LANE_MASTER_BEAT = "masterBeat"
         const val LANE_MASTER_BPM = "masterBpm"
         private const val K_A_START = "geom.aStartBeat"; private const val K_B_START = "geom.bStartBeat"; private const val K_B_ENTER = "geom.bEnterBeat"
-        private const val K_BODY_BEATS = "geom.bodyBeats"; private const val K_SETTLE = "geom.settleBeats"; private const val K_DRUMS = "geom.drumsSwapBeat"
+        private const val K_BODY_BEATS = BeatDomain.PARAM_BODY_BEATS; private const val K_SETTLE = "geom.settleBeats"; private const val K_DRUMS = "geom.drumsSwapBeat"
         private const val K_BASS = "geom.bassSwapBeat"; private const val K_CROSS = "geom.crossStartBeat"; private const val K_SWAP = "geom.swapBeats"
 
         /** §5.2 key score blended toward 0.6 by the weaker key strength. */

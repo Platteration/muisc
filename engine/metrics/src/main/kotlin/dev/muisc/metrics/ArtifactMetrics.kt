@@ -1,9 +1,11 @@
 package dev.muisc.metrics
 
+import dev.muisc.analysis.model.BeatGrid
 import dev.muisc.audio.AudioBuffer
 import dev.muisc.dsp.loudness.LoudnessMeter
 import dev.muisc.dsp.loudness.TruePeak
 import dev.muisc.transitions.RenderedTransition
+import dev.muisc.transitions.TempoRelation
 import dev.muisc.transitions.TransitionInput
 import dev.muisc.transitions.core.MasterGrid
 import kotlin.math.abs
@@ -30,10 +32,13 @@ import kotlin.math.min
  * either source window ([ONSET_GUARD_MS] for clicks, the wider [LEVEL_ONSET_GUARD_MS] for level steps, whose
  * statistic spans several windows), detected with [Signals.onsetFrames] and mapped into output frames through
  * the splice contract: output frame `o` is A's frame `plan.aExitOffset + o` and B's frame
- * `plan.bEntryOffset - outputFrames + o`. That mapping is exact in the dry guard regions and approximate in a
- * time-stretched middle, which is all the exclusion needs. Without sources the level check falls back to the
- * render's own onsets (see [levelOnsets]); the click check needs no exclusion at all, its peak-versus-local-RMS
- * criterion is conservative enough to report zero clicks on undamaged material.
+ * `plan.bEntryOffset - outputFrames + o`. Those constant offsets are exact wherever a deck plays at ratio 1.0,
+ * which for most strategies is the whole segment. A beat-domain render (one that publishes [MASTER_BEAT_LANE])
+ * time-stretches its decks onto a master grid for tens of seconds, and there the offsets drift by the accumulated
+ * stretch - 44 to 308 ms on the synthetic fixtures, far outside every guard - so its sources are mapped through
+ * their beat grids instead ([MasterBeatMap]). Without sources the level check falls back to the render's own
+ * onsets (see [levelOnsets]); the click check needs no exclusion at all, its peak-versus-local-RMS criterion is
+ * conservative enough to report zero clicks on undamaged material.
  */
 object ArtifactMetrics {
 
@@ -590,8 +595,9 @@ object ArtifactMetrics {
     }
 
     /**
-     * Onsets of both source windows expressed in output frames (see the object doc). Sorted ascending; empty
-     * when no [input] is available, which simply makes the click and level checks stricter.
+     * Onsets of both source windows expressed in output frames (see the object doc): through the splice contract's
+     * constant offsets, or through the beat grids for a beat-domain render ([MasterBeatMap]). Sorted ascending;
+     * empty when no [input] is available, which simply makes the click and level checks stricter.
      */
     fun sourceOnsetsInOutput(rendered: RenderedTransition, input: TransitionInput?): IntArray =
         mapSourceMarks(rendered, input) { Signals.onsetFrames(it) }
@@ -600,19 +606,120 @@ object ArtifactMetrics {
         if (input == null) return IntArray(0)
         val plan = rendered.plan
         val frames = rendered.audio.frames
+        val beats = MasterBeatMap.of(rendered, input)
         val acc = ArrayList<Int>()
         for (f in marks(input.aAudio)) {
-            val o = f - plan.aExitOffset
+            val o = if (beats != null) beats.aOutputFrame(f) else f - plan.aExitOffset
             if (o in 0 until frames) acc += o
         }
         for (f in marks(input.bAudio)) {
-            val o = f + frames - plan.bEntryOffset
+            val o = if (beats != null) beats.bOutputFrame(f) else f + frames - plan.bEntryOffset
             if (o in 0 until frames) acc += o
         }
         val out = IntArray(acc.size)
         for (i in acc.indices) out[i] = acc[i]
         out.sort()
         return out
+    }
+
+    /**
+     * Where a source frame is heard in a **beat-domain** render, i.e. one that publishes [MASTER_BEAT_LANE].
+     *
+     * Such a render keeps the splice contract at its two ends - output `[0, lane[0])` is A's dry pre-roll and
+     * output `[lane[K], end)` B's dry post-roll, both at ratio 1.0 - and in between places every deck beat on a
+     * master beat: A's beat at the end of the pre-roll sits on master beat 0 and A advances one of its own beats per
+     * master beat; B's beat at the start of the post-roll sits on master beat K and B advances one *matched* beat
+     * per master beat (two of its own beats in half time, half a beat in double time, [TempoRelation]). A source
+     * frame is placed by its fractional beat position in its own grid and its output frame interpolated between the
+     * master beats around it. The constant offsets are kept where they are exact (A before master beat 0, B after
+     * master beat K); a frame of A after master beat K, or of B before master beat 0, is not played and maps to -1.
+     *
+     * Every beat-domain strategy (`beatMatchedBlend`, `bassSwap`, `harmonicBlend`, `stemSwap`, `drumBreakBridge`)
+     * and every beat-domain recipe lays its segment out this way; a strategy whose decks enter or leave elsewhere
+     * must not publish the lane (see [MASTER_BEAT_LANE]).
+     */
+    private class MasterBeatMap(
+        private val masterBeats: DoubleArray,
+        private val masterFrames: DoubleArray,
+        private val a: BeatGrid,
+        private val aToGrid: Double,
+        private val aWindowStart: Long,
+        private val aExitOffset: Int,
+        private val aBeatAtMasterStart: Double,
+        private val b: BeatGrid,
+        private val bToGrid: Double,
+        private val bWindowStart: Long,
+        private val bPostRollOffset: Int,
+        private val bBeatAtMasterEnd: Double,
+        private val bBeatsPerMasterBeat: Double,
+    ) {
+        private val first: Double get() = masterBeats[0]
+        private val last: Double get() = masterBeats[masterBeats.size - 1]
+
+        /** Output frame of A's window frame [f], or -1 when the render never plays it. */
+        fun aOutputFrame(f: Int): Int {
+            val m = first + (a.beatAtFrame(Math.round((aWindowStart + f) * aToGrid)) - aBeatAtMasterStart)
+            return when {
+                m < first -> f - aExitOffset
+                m > last -> -1
+                else -> outputFrameOf(m)
+            }
+        }
+
+        /** Output frame of B's window frame [f], or -1 when the render never plays it. */
+        fun bOutputFrame(f: Int): Int {
+            val m = last - (bBeatAtMasterEnd - b.beatAtFrame(Math.round((bWindowStart + f) * bToGrid))) / bBeatsPerMasterBeat
+            return when {
+                m > last -> f + bPostRollOffset
+                m < first -> -1
+                else -> outputFrameOf(m)
+            }
+        }
+
+        /** Output frame of the fractional master beat [m] (`first <= m <= last`), linear between lane points. */
+        private fun outputFrameOf(m: Double): Int {
+            var lo = 0
+            var hi = masterBeats.size - 1
+            while (hi - lo > 1) { val mid = (lo + hi) ushr 1; if (masterBeats[mid] <= m) lo = mid else hi = mid }
+            val t = (m - masterBeats[lo]) / (masterBeats[hi] - masterBeats[lo])
+            return Math.round(masterFrames[lo] + t * (masterFrames[hi] - masterFrames[lo])).toInt()
+        }
+
+        companion object {
+            /** The map of [rendered], or null when it is not a beat-domain render (no `masterBeat` lane to follow). */
+            fun of(rendered: RenderedTransition, input: TransitionInput): MasterBeatMap? {
+                val points = rendered.plan.lanes.firstOrNull { it.id == MASTER_BEAT_LANE }?.points ?: return null
+                if (points.size < 2) return null
+                val plan = rendered.plan
+                val sr = rendered.audio.sampleRate.toDouble()
+                val frames = rendered.audio.frames
+                val masterFrames = DoubleArray(points.size) { points[it].outputSec * sr }
+                val aToGrid = input.aAnalysis.sampleRate / input.aAudio.sampleRate.toDouble()
+                val bToGrid = input.bAnalysis.sampleRate / input.bAudio.sampleRate.toDouble()
+                // Source frames at the two ends of the beat domain, from the splice contract (exact there).
+                val aAtStart = plan.aExitFrame + masterFrames[0]
+                val bAtEnd = plan.bEntryFrame - (frames - masterFrames[masterFrames.size - 1])
+                return MasterBeatMap(
+                    masterBeats = DoubleArray(points.size) { points[it].value },
+                    masterFrames = masterFrames,
+                    a = input.aAnalysis.grid,
+                    aToGrid = aToGrid,
+                    aWindowStart = plan.aWindow.start,
+                    aExitOffset = plan.aExitOffset,
+                    aBeatAtMasterStart = input.aAnalysis.grid.beatAtFrame(Math.round(aAtStart * aToGrid)),
+                    b = input.bAnalysis.grid,
+                    bToGrid = bToGrid,
+                    bWindowStart = plan.bWindow.start,
+                    bPostRollOffset = frames - plan.bEntryOffset,
+                    bBeatAtMasterEnd = input.bAnalysis.grid.beatAtFrame(Math.round(bAtEnd * bToGrid)),
+                    bBeatsPerMasterBeat = when (input.features.tempoRelation) {
+                        TempoRelation.SAME -> 1.0
+                        TempoRelation.HALF -> 2.0
+                        TempoRelation.DOUBLE -> 0.5
+                    },
+                )
+            }
+        }
     }
 
     /**

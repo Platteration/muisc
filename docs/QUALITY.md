@@ -110,13 +110,54 @@ t126Am's `mixOutBeat` at beat 16 of 64, at the start of its DROP section rather 
 
 6. **`loudnessSmoothness`.** Re-derived from the measurement rather than adjusted. It does *not* warn on nearly
    every transition: on the 120→126 pair every strategy that blends is inside the 3 LU/s² budget (crossfade 1.71,
-   outroIntroMinimal 0.35, filterSweep 1.67, beatMatchedBlend 2.75, bassSwap 2.89), and the ones above it are
+   outroIntroMinimal 0.35, filterSweep 1.67, beatMatchedBlend 2.75, bassSwap 2.89, and stemSwap 2.25 since item 7
+   — its earlier 4.9 was the 1.5 s hole item 7 removed), and the ones above it are
    the ones whose musical content *is* a step (phraseCut 4.2, spectralFreezeBridge 4.1, ambientBridge 4.8,
-   stemSwap 4.9, loopRollRiser 6.5, echoOut 9.5, brakeStop 178). So 3 LU/s² is the right budget for a fade and is
+   loopRollRiser 6.5, echoOut 9.5, brakeStop 178). So 3 LU/s² is the right budget for a fade and is
    not a defect threshold for a cut — a step has unbounded curvature however cleanly it is executed. Raising the
    number until `brakeStop` passes would only stop it catching the thing it exists for. The budget stays, the
    metric stays WARN-only with no FAIL level, and the KDoc now says it is read against the strategy that
    produced it.
+
+7. **Level jumps on the beat-domain blends** (24–29 dB → 5.4–7.0 dB on `beatMatchedBlend`, `bassSwap`,
+   `stemSwap` and `harmonicBlend`; `drumBreakBridge` 25.6 / 27.4 → 14.4 / 10.6, which is known failure 3). One
+   metric defect shared by all five, and one real defect in two of them. Measured on `t120C → t126Am` (`ab --all`)
+   and on `t126_Am → t120_C` (`muisc synth --bpm 126 --key Am` and `--bpm 120 --key C`, then `render --strategy`);
+   the planner attaches `tempoGlide` and `textureCarry` to every one of these except `drumBreakBridge` on the
+   first pair.
+   - *Metric*: every flagged boundary was the kick on a master beat. On `harmonicBlend t126_Am → t120_C` the worst
+     (24.47 dB at 19.380 s, master beat 40) rises from -31…-40 dB to -5…-7 dB; both sources rise 33–38 dB at the
+     same beat position (A -37 → -4.5 dB, B -42 → -3.9 dB) and the render stays within 2.5 dB of the gain-weighted
+     sources from 60 ms before the beat to 200 ms after it. The "explained by a source onset" rule placed the sources' onsets with the splice
+     contract's constant offsets, i.e. at ratio 1.0, but a beat-domain render stretches its decks onto the master
+     grid for 20–35 s: at the six worst boundaries the mapped A onsets were 59–308 ms and the B onsets 44–271 ms
+     from where the render plays them, outside the 40 ms guard. Renders that publish `masterBeat` now map both
+     sources through their beat grids (`ArtifactMetrics.MasterBeatMap`: A's beat at the end of the pre-roll on
+     master beat 0, B's at the start of the post-roll on master beat K, one matched beat per master beat). On the
+     regression test's `beatMatchedBlend` (the metrics fixtures' 120 → 126 BPM pair, 20.23 → 5.95 dB) every kick
+     the render plays on a master beat then lies within 2.3 ms of a mapped onset. The check did not go blind: on
+     that render it excuses fewer boundaries than before (1195 of 2791 against 1367), and of 477 injected
+     6 dB steps (every 50 ms over the stretched body) 84 now read WARN against 78 before; with the old mapping a real
+     6 dB step there did not move the reported maximum at all (20.23 dB with and without it).
+   - *Real*: `stemSwap` and `drumBreakBridge` build their own master grid, and their windows, B's entry and every
+     swap are sized in beats of their body (`geom.bodyBeats`). Under `tempoGlide` they rendered on a grid of
+     `glideBars + holdBars` bars whatever the body was, because the modifier re-derived the frames only for plans
+     with `BeatDomain` geometry. `stemSwap t120C → t126Am` ran a 48-beat grid over a 44-beat body: B's deck ran
+     past the end of its decoded window and from master beat 44.75 the render fell to -54…-86 dB for 1.5 s before
+     the post-roll (`silenceGapMs` 601), 6.25 % longer than planned — its 29.08 dB was the drop into that hole, not
+     a kick. `drumBreakBridge t126_Am → t120_C` ran 72 beats over 52: from master beat 53 to 68 (about 7.5 s) both
+     decks were silent and only the `textureCarry` bed played, at about -41 dB, then it faded to -80 dB before the
+     post-roll; 41.6 % longer than planned. A grid shorter than the body failed the other way: `stemSwap
+     t126_Am → t120_C` ran 72 beats over 76, the render ended 2.8 % short and its last master beats played B's
+     beats 73–74 straight into a post-roll that starts at B's beat 79 — a bar of B skipped at the seam. The modifier
+     now fits the glide inside the body
+     (`preBars + glideBars + holdBars` = the body's bars) and only `expectedOutputFrames` follows the new grid:
+     `lengthErrorPct` 0 and `silenceGapMs` 0 on all three affected renders, `tailContainedDb` -59.5 → -97.0 on
+     `stemSwap t120C → t126Am`. Its `beatAlignmentMaxMs` moved from 20.05 to 30.14 ms with the new render (median
+     0.62 → 0.60; see known failure 2).
+   Regression tests: `ArtifactMetricsTest.beatDomainSourceOnsetsLandOnTheKicksTheRenderPlays`,
+   `ArtifactMetricsTest.aLevelStepInsideABeatDomainBlendIsStillDetected`,
+   `TempoGlideModifierTest.strategiesWithTheirOwnGridKeepTheirBodyUnderAGlide`.
 
 ## Known failures on the fixture set
 
@@ -135,16 +176,52 @@ metrics is to make transition quality measurable while it is tuned.
    sources' own, not against a set of frames. The same limit puts the whole-program `muisc check` at 6.98 dB,
    where there are no sources at all to excuse the tracks' dynamics.
 
-2. **`beatAlignmentMaxMs` on beat-domain strategies** (20–97 ms against a 12 ms budget) — newly visible now that
+2. **`beatAlignmentMaxMs` on beat-domain strategies** (30–97 ms against a 12 ms budget) — newly visible now that
    the metric is scoped to the renders it means something for. The medians are excellent (beatMatchedBlend 1.63,
-   harmonicBlend 1.97, stemSwap 0.62, drumBreakBridge 0.73), so the decks *are* locked; the maximum is dominated
+   harmonicBlend 1.97, stemSwap 0.60, drumBreakBridge 0.73), so the decks *are* locked; the maximum is dominated
    by master beats that the render does not articulate at all, which the 100 ms search window then pairs with a
-   neighbouring event. A 97 ms outlier next to a 1.6 ms median is not a timing error. The statistic needs to be
+   neighbouring event. A 97 ms outlier next to a 1.6 ms median is not a timing error. `stemSwap`'s maximum moved
+   from 20.05 to 30.14 ms when fixed item 7 changed its render; the two beats behind it (master beats 7 and 18)
+   are paired with events 29–30 ms after the beat, and at both the render follows its source (at beat 18 B's own
+   onset is at +29.1 ms in the source and in the render; at beat 7 the render's envelope is within 2 dB of A's at
+   3 ms resolution). The statistic needs to be
    robust (a high percentile, or "beats the render actually articulates") before the max is worth believing.
    `bassSwap` is the one to look at first: its median is 14.3 ms, which is a real offset, not an outlier.
 
-3. **`levelJumpDb` 24–29 dB on the long beat-domain blends** (`beatMatchedBlend`, `bassSwap`, `stemSwap`,
-   `drumBreakBridge`, `harmonicBlend`). Unchanged from before and not investigated in this pass.
+3. **`levelJumpDb` 5.4–7.0 dB on the beat-domain blends, 10.6–14.4 dB on `drumBreakBridge`** (FAIL at 6). What
+   is left once fixed item 7 excuses the kicks and removes the glide's holes, all of it the sources' own dynamics:
+
+   | strategy | t120C → t126Am before | after | t126_Am → t120_C before | after |
+   |---|---|---|---|---|
+   | `beatMatchedBlend` | 24.25 | 6.93 | 24.31 | 7.01 |
+   | `bassSwap` | 24.10 | 6.76 | 23.00 | 5.44 |
+   | `stemSwap` | 29.08 | 5.56 | 25.62 | 6.84 |
+   | `drumBreakBridge` | 25.59 | 14.38 | 27.44 | 10.60 |
+   | `harmonicBlend` | 27.48 | 6.93 | 24.47 | 6.29 |
+
+   - On the four blends the worst boundary of each of the eight renders is a step in the sources' own material
+     that is no onset by the detector's definition, and the render follows the source through it (0–2 dB apart,
+     mostly a constant gain offset): a note end in five (e.g. `harmonicBlend t126_Am → t120_C` at 30.00 s, B
+     alone: B -14.5 → -21.4 dB, render -15.4 → -22.5 dB), a rise spread over more than one 3 ms detector block in
+     three (e.g. `beatMatchedBlend` and `harmonicBlend t120C → t126Am` at 22.48 s, where the render is B at
+     correlation 1.000: B -23.2 → -16.3 dB, render -24.0 → -17.1 dB). On `bassSwap t120C → t126Am` (18.68 s) B's
+     own rise reads 6.0 dB by the same statistic and the render 6.76 dB: the difference is a 2 ms dip 8 ms before
+     the attack, while B is still being stretched. That is known failure 1's mechanism, and it is not fixed here.
+   - On `drumBreakBridge` the flagged rises sit on the off-beats of the drum solo (master beats x.49), where A's
+     drum stem plays alone, high-passed (the worst on `t120C → t126Am`, at master beat 32.49, is half a beat into
+     the one-bar drum handover, A's drums at 0.98 and B's at 0.19); no gain lane steps at any of them. A's source
+     has a hi-hat attack at each — above 4 kHz it rises from -56…-80 dB to -19…-23 dB — but in its full mix,
+     where pads and bass sit at -17…-23 dB, the onset detector finds none: the nearest onset of the full mix is
+     62–249 ms away. The rule takes its onsets from the sources' full mixes, so an attack that a soloed stem
+     exposes has nothing to excuse it. Not an audio defect; not fixed (onsets per stem would need a stem
+     separation in the install gate).
+   - The beat-domain recipes on `t120C → t126Am` share the metric fix: `smooth-blend` and `club-bass-swap` 9.64 →
+     7.22, `drums-first` 17.21 → 11.93, `long-glide` 19.21 → 5.39, `tension-build` 10.06 → 8.18. What remains on
+     them has not been investigated.
+   - The Lab's 29 dB on `stemSwap` at 34–64 overlap bars could not be reproduced as a long overlap: on the 32- and
+     96-bar synthetic 126 → 120 pairs `stemSwap` shortens any `overlapBars` from 34 to 64 to 19 bars ("A has 19
+     bars after its phrase start"), and there it measures 25.6 → 6.8 dB; the 29.08 dB on `t120C → t126Am` was the
+     silence of fixed item 7.
 
 4. **`truePeakDbtp` above -0.5 dBTP on most strategies** (-0.26 to -0.64). The fixtures themselves peak at
    +1.1 dBTP, the CLI's default prefs apply no deck gain, and the splice contract requires the guard regions to

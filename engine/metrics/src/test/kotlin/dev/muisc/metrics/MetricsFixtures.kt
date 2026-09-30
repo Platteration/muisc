@@ -18,6 +18,7 @@ import dev.muisc.transitions.TransitionPlan
 import dev.muisc.transitions.TransitionPrefs
 import dev.muisc.transitions.DefaultPairAnalyzer
 import dev.muisc.transitions.core.DeckGain
+import dev.muisc.transitions.strategies.BeatMatchedBlendStrategy
 import dev.muisc.transitions.strategies.CrossfadeStrategy
 import dev.muisc.transitions.synthetic.SyntheticTrack
 import dev.muisc.transitions.synthetic.SyntheticTrackLoader
@@ -63,6 +64,20 @@ internal object MetricsFixtures {
         cache.getOrPut("$params/$seed") {
             val strategy = CrossfadeStrategy()
             val plan = strategy.plan(trackA.analysis, trackB.analysis, features, params, prefs, seed)
+            val input = input(plan)
+            Case(input, strategy.render(input, RenderContext(prefs, seed)))
+        }
+    }
+
+    /**
+     * A `beatMatchedBlend` render of the same pair: a beat-domain segment whose decks are time-stretched onto a
+     * master grid (B, at 126 BPM, runs 5 % slow to sit on A's 120 BPM grid for the whole overlap), which publishes
+     * the `masterBeat` lane.
+     */
+    fun beatMatchedBlend(seed: Long = 3L): Case = synchronized(cache) {
+        cache.getOrPut("beatMatchedBlend/$seed") {
+            val strategy = BeatMatchedBlendStrategy()
+            val plan = strategy.plan(trackA.analysis, trackB.analysis, features, Params.EMPTY, prefs, seed)
             val input = input(plan)
             Case(input, strategy.render(input, RenderContext(prefs, seed)))
         }
