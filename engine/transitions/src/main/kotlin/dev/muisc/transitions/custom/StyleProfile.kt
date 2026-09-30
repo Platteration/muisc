@@ -1,6 +1,7 @@
 package dev.muisc.transitions.custom
 
 import dev.muisc.transitions.TransitionPrefs
+import dev.muisc.transitions.sdk.Technique
 import kotlinx.serialization.Serializable
 import java.io.File
 
@@ -27,6 +28,12 @@ data class PrefsPatch(
     val prefer: List<String> = emptyList(),
     /** Presets to use per strategy; entries replace the base's entry for the same strategy. */
     val activePresets: Map<String, String> = emptyMap(),
+    /**
+     * Techniques added to `excludedTechniques`: every strategy that declares one of them for the params it would be
+     * planned with (every recipe does, from its content) is left out by the planner. Built-in strategies do not
+     * declare techniques; exclude them with [disable].
+     */
+    val exclude: Set<Technique> = emptySet(),
 ) {
     /** [base] with this patch applied. */
     fun apply(base: TransitionPrefs): TransitionPrefs {
@@ -43,6 +50,7 @@ data class PrefsPatch(
             strategyWeights = weightsOut,
             disabledStrategies = base.disabledStrategies + disable,
             activePresets = base.activePresets + activePresets,
+            excludedTechniques = base.excludedTechniques + exclude,
         )
     }
 
@@ -68,6 +76,7 @@ data class PrefsPatch(
         for ((id, w) in weights.toSortedMap()) add("weight $id × $w")
         for (id in prefer) add("prefer $id (weight × $PREFER_BOOST)")
         if (disable.isNotEmpty()) add("disable " + disable.sorted().joinToString(", "))
+        if (exclude.isNotEmpty()) add("exclude any technique using " + exclude.sortedBy { it.ordinal }.joinToString(", ") { it.label })
         for ((s, p) in activePresets.toSortedMap()) add("preset $s → $p")
     }
 
@@ -209,6 +218,7 @@ object BuiltInStyles {
                     "echoOut", "filterSweep", "loopRollRiser", "brakeStop", "spectralFreezeBridge", "ambientBridge",
                     "drumBreakBridge", "stemSwap", "textureCarry", "tempoGlide",
                 ),
+                exclude = Technique.entries.toSet(),
                 activePresets = mapOf("phraseCut" to "dry-cut", "bassSwap" to "tight-bass-swap", "beatMatchedBlend" to "short-blend"),
             ),
         ),

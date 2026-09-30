@@ -36,7 +36,10 @@ class PlannerCustomization(
  * <dir>/feedback.json        rating tallies      (FileFeedbackStore)
  * ```
  *
- * Nothing is created until something is saved.
+ * Nothing is created until something is saved. Saving a pin or a rating also creates an empty hidden lock file next
+ * to it (`.pins.json.lock`, `.feedback.json.lock`), which lets several programs share the directory safely.
+ * Several [UserProfile]s (or programs) may use one directory at once: pins and ratings are re-read when their
+ * files change and saved with a read-modify-write under that lock, so none of them overwrites another's changes.
  */
 class UserProfile(val dir: File) {
     val presets: FilePresetStore = FilePresetStore(File(dir, "presets"))

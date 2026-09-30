@@ -2,6 +2,7 @@ package dev.muisc.transitions
 
 import dev.muisc.analysis.model.TrackAnalysis
 import dev.muisc.audio.AudioSourceId
+import dev.muisc.transitions.sdk.Technique
 import kotlinx.serialization.Serializable
 
 /**
@@ -69,6 +70,12 @@ data class TransitionPrefs(
      * applies the preset's values under [paramOverrides]: explicit overrides still win.
      */
     val activePresets: Map<String, String> = emptyMap(),
+    /**
+     * Techniques the planner must not use (see [dev.muisc.transitions.sdk.Technique]): a strategy that declares, for
+     * the params it would be planned with, a technique in this set is left out (`crossfade` never is). Strategies
+     * that do not declare their techniques (the built-ins) are only excluded through [disabledStrategies].
+     */
+    val excludedTechniques: Set<Technique> = emptySet(),
 )
 
 /** The gating rule: when do two consecutive queue items get a transition at all. */

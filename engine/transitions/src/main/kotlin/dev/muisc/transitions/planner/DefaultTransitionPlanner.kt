@@ -34,7 +34,10 @@ import kotlin.math.abs
  *  2. `plan()` with `Params.defaults(specs).withAll(prefs.paramOverrides[id])` — a strategy whose `plan()` throws
  *     is skipped and reported in the [PlanExplanation] (the ladder moves on, the pair still plans). With an active
  *     preset or a pin the params are layered as documented in [PresetResolution]: defaults ← active preset
- *     (`prefs.activePresets[id]`) ← `prefs.paramOverrides[id]` ← the pin's preset ← the pin's params;
+ *     (`prefs.activePresets[id]`) ← `prefs.paramOverrides[id]` ← the pin's preset ← the pin's params. Before
+ *     `plan()`, a strategy implementing [StrategyTraits] whose `techniques(params)` include one of
+ *     `prefs.excludedTechniques` is skipped ("excluded in prefs"; never `crossfade`), so a style's exclusion holds
+ *     whatever preset, override or pin supplied the params;
  *  3. every registered modifier with `applicability > `[MODIFIER_ATTACH_THRESHOLD] (and not disabled) adjusts
  *     the plan in registry order; its resolved params are written into `plan.params` under
  *     `"<modifierId>.<paramId>"` ([ModifierParams]) and its id appended to `plan.modifiers`;
@@ -111,6 +114,17 @@ class DefaultTransitionPlanner(
             var overrides = active.preset?.params?.values.orEmpty() + prefs.paramOverrides[id].orEmpty()
             if (pinned) overrides = overrides + pinPreset?.params?.values.orEmpty() + pin!!.params?.values.orEmpty()
             val params = Params.defaults(strategy.params).withAll(overrides)
+            if (prefs.excludedTechniques.isNotEmpty() && id != CROSSFADE_ID && strategy is StrategyTraits) {
+                val uses = try {
+                    strategy.techniques(params, a.analysis.grid.beatsPerBar.coerceAtLeast(1))
+                } catch (e: RuntimeException) {
+                    skipped += SkippedStrategy(id, "techniques() failed: ${e.message ?: e.javaClass.simpleName}"); continue
+                }
+                val hit = uses.orEmpty().filter { it in prefs.excludedTechniques }
+                if (hit.isNotEmpty()) {
+                    skipped += SkippedStrategy(id, "excluded in prefs: uses " + hit.sortedBy { it.ordinal }.joinToString(", ") { it.label }); continue
+                }
+            }
             val allowedModifiers: List<String>? = if (pinned && pinPreset?.modifiers != null) pinPreset.modifiers else active.preset?.modifiers
             var plan = try {
                 strategy.plan(a.analysis, b.analysis, features, params, prefs, seed)

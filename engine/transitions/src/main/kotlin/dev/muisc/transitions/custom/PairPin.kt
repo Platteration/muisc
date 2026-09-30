@@ -89,14 +89,19 @@ internal val PIN_ORDER: Comparator<PairPin> = compareBy({ it.aFingerprint }, { i
 
 /**
  * Pins in one JSON file (`{"version": 1, "pins": [ ... ]}`), written atomically. The file is re-read when it changes
- * on disk. A pin entry that does not parse is skipped and reported in [warnings]; a file that does not parse at all
- * yields no pins and a warning. In both cases the file is moved aside (`pins.json.corrupt`) before the next write,
+ * on disk ([FileStamp]), and [set] / [clear] are a read-modify-write under [FileLocks] (an OS lock on
+ * `.pins.json.lock`, shared with other processes): they re-read the file, apply the change and write it, so a pin
+ * saved by another store or process (the Lab, `muisc pin`, the app) is never overwritten. When the lock cannot be
+ * taken the change is still saved and [warnings] says so. A pin entry that does not parse is skipped and reported
+ * in [warnings]; a file that does not parse at all yields no pins and a warning. In both cases the file is moved aside (`pins.json.corrupt`) before the next write,
  * so nothing that failed to load is overwritten.
  */
 class FilePinStore(val file: File) : PinStore {
     private var cache: List<PairPin> = emptyList()
-    private var stamp: Pair<Long, Long>? = null
+    private var stamp: FileStamp? = null
     private var unreadable = false
+
+    @Volatile private var lockProblem: String? = null
 
     @Volatile override var warnings: List<String> = emptyList()
         private set
@@ -108,16 +113,28 @@ class FilePinStore(val file: File) : PinStore {
 
     @Synchronized override fun set(pin: PairPin) {
         validatePin(pin)
-        val next = load().filter { it.key != pin.key } + pin
-        write(next)
+        locked {
+            val next = reload().filter { it.key != pin.key } + pin
+            write(next)
+        }
     }
 
-    @Synchronized override fun clear(aFingerprint: String, bFingerprint: String): Boolean {
-        val current = load()
+    @Synchronized override fun clear(aFingerprint: String, bFingerprint: String): Boolean = locked {
+        val current = reload()
         val next = current.filter { it.key != (aFingerprint to bFingerprint) }
-        if (next.size == current.size) return false
+        if (next.size == current.size) return@locked false
         write(next)
-        return true
+        true
+    }
+
+    private fun <T> locked(block: () -> T): T = FileLocks.withLock(file, onDegraded = { why ->
+        lockProblem = why?.let { "pins in ${file.path} were saved without the inter-process lock ($it); a pin saved at the same moment by another program may be lost" }
+    }, block = block)
+
+    /** What is on disk now, whatever the stamp says. */
+    private fun reload(): List<PairPin> {
+        stamp = null
+        return load()
     }
 
     private fun write(pins: List<PairPin>) {
@@ -133,11 +150,11 @@ class FilePinStore(val file: File) : PinStore {
 
     private fun load(): List<PairPin> {
         if (!file.isFile) {
-            cache = emptyList(); stamp = null; unreadable = false; warnings = emptyList()
+            cache = emptyList(); stamp = null; unreadable = false; warnings = listOfNotNull(lockProblem)
             return cache
         }
-        val now = file.lastModified() to file.length()
-        if (now == stamp) return cache
+        val now = FileStamp.of(file)
+        if (now != null && now == stamp) return cache
         val problems = ArrayList<String>()
         val pins = ArrayList<PairPin>()
         unreadable = false
@@ -167,7 +184,7 @@ class FilePinStore(val file: File) : PinStore {
         unreadable = problems.isNotEmpty()
         cache = pins.sortedWith(PIN_ORDER)
         stamp = now
-        warnings = problems
+        warnings = problems + listOfNotNull(lockProblem)
         return cache
     }
 }

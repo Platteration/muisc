@@ -15,9 +15,16 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonElement
 import java.io.File
 import java.io.IOException
+import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.attribute.FileTime
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * The JSON dialect of the user's customization files (presets, styles, pins, feedback). Strict about unknown keys,
@@ -102,6 +109,75 @@ object AtomicFiles {
         } while (target.exists())
         Files.move(file.toPath(), target.toPath())
         return target
+    }
+}
+
+/**
+ * What a store last saw of a file: modification time (full precision), size and file key (the inode where the
+ * platform has one). [AtomicFiles.write] replaces the file with a new one, so the key changes on every write even
+ * when the time and size do not. Null from [of] means the file does not exist.
+ */
+internal data class FileStamp(val modified: FileTime, val size: Long, val key: Any?) {
+    companion object {
+        fun of(file: File): FileStamp? = try {
+            val a = Files.readAttributes(file.toPath(), BasicFileAttributes::class.java)
+            if (!a.isRegularFile) null else FileStamp(a.lastModifiedTime(), a.size(), a.fileKey())
+        } catch (e: IOException) {
+            null
+        }
+    }
+}
+
+/**
+ * Mutual exclusion for a store's read-modify-write of one file, between threads of this process AND between
+ * processes (the Lab, `muisc rate`, `muisc pin`, the app): an OS file lock on a hidden sidecar file next to the
+ * target (`.<name>.lock`), held while the store re-reads the file, applies its change and writes it atomically.
+ *
+ * Safety net (AGENTS.md §5): when the sidecar cannot be created or locked (a file system without locks, a lock held
+ * for more than [WAIT_MS]), the change is still made under the in-process lock only and [withLock] reports why
+ * through `onDegraded`, so the store can show a warning. A save is never refused because of the lock.
+ */
+internal object FileLocks {
+    const val WAIT_MS: Long = 10_000
+    private const val POLL_MS: Long = 10
+
+    private val inProcess = ConcurrentHashMap<String, ReentrantLock>()
+
+    fun lockFileOf(target: File): File = File(target.absoluteFile.parentFile, ".${target.name}.lock")
+
+    /** Runs [block] holding the lock of [target]; `onDegraded(null)` when the OS lock was held, else the reason. */
+    fun <T> withLock(target: File, onDegraded: (String?) -> Unit, block: () -> T): T {
+        val lockFile = lockFileOf(target)
+        val local = inProcess.computeIfAbsent(lockFile.absoluteFile.normalize().path) { ReentrantLock() }
+        local.lock()
+        try {
+            var channel: FileChannel? = null
+            var lock: FileLock? = null
+            try {
+                lockFile.parentFile?.mkdirs()
+                channel = FileChannel.open(lockFile.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)
+                val deadline = System.nanoTime() + WAIT_MS * 1_000_000
+                while (true) {
+                    lock = channel.tryLock()
+                    if (lock != null || System.nanoTime() > deadline) break
+                    Thread.sleep(POLL_MS)
+                }
+                onDegraded(if (lock == null) "${lockFile.path} stayed locked for ${WAIT_MS / 1000} s" else null)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                onDegraded("interrupted while waiting for ${lockFile.path}")
+            } catch (e: Exception) { // IOException, UnsupportedOperationException, OverlappingFileLockException
+                onDegraded("cannot lock ${lockFile.path}: ${e.message ?: e.javaClass.simpleName}")
+            }
+            try {
+                return block()
+            } finally {
+                try { lock?.release() } catch (e: IOException) { /* closing the channel releases it too */ }
+                try { channel?.close() } catch (e: IOException) { /* nothing left to do */ }
+            }
+        } finally {
+            local.unlock()
+        }
     }
 }
 

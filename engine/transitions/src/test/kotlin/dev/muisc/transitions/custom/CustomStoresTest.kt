@@ -74,6 +74,45 @@ class CustomStoresTest {
     }
 
     @Test
+    fun savingOverAnUnreadablePresetOrStyleFileKeepsTheOriginalAside(@TempDir dir: File) {
+        // An unreadable file is skipped by list(), so its id looks free (DjCustomization.savePreset, `muisc preset
+        // save`, POST /api/presets): the next save with that id must keep the user's hand-edited bytes.
+        val presets = FilePresetStore(File(dir, "presets"))
+        val bad = mapOf(
+            "tight-swap" to "{ \"id\": \"tight-swap\", \"name\": \"Tight\", ",
+            "typo-swap" to """{"id": "typo-swap", "name": "Typo", "strategyId": "bassSwap", "parms": {"overlapBars": 8}}""",
+        )
+        File(dir, "presets").mkdirs()
+        for ((id, text) in bad) File(dir, "presets/$id.json").writeText(text)
+        assertTrue(presets.list().isEmpty())
+        assertEquals(2, presets.warnings.size, presets.warnings.toString())
+        for (id in bad.keys) {
+            presets.save(StrategyPreset(id, "Saved", "bassSwap", Params(mapOf("overlapBars" to "8"))))
+            assertEquals(bad.getValue(id), File(dir, "presets/$id.json.corrupt").readText(), "$id: the unreadable preset is kept")
+            assertEquals("Saved", presets.get(id)!!.name)
+        }
+
+        val styles = FileStyleStore(File(dir, "styles"))
+        val badStyles = mapOf(
+            "late-night" to "{ not json",
+            "typo-style" to """{"id": "typo-style", "name": "Typo", "patch": {"enrgy": 0.2}}""",
+            "loud" to """{"id": "loud", "name": "Loud", "patch": {"energy": 3.0}}""",
+        )
+        File(dir, "styles").mkdirs()
+        for ((id, text) in badStyles) File(dir, "styles/$id.json").writeText(text)
+        assertTrue(styles.list().isEmpty())
+        assertEquals(3, styles.warnings.size, styles.warnings.toString())
+        for (id in badStyles.keys) {
+            styles.save(StyleProfile(id, "Saved", patch = PrefsPatch(energy = 0.3)))
+            assertEquals(badStyles.getValue(id), File(dir, "styles/$id.json.corrupt").readText(), "$id: the unreadable style is kept")
+            assertEquals("Saved", styles.get(id)!!.name)
+        }
+        // A readable file is simply replaced: nothing is set aside.
+        styles.save(StyleProfile("loud", "Saved again"))
+        assertFalse(File(dir, "styles/loud.json.corrupt.1").exists())
+    }
+
+    @Test
     fun presetIdsAreValidatedAndBuiltInsAreReadOnly(@TempDir dir: File) {
         for (store in listOf(FilePresetStore(dir), InMemoryPresetStore())) {
             assertFailsWith<IllegalArgumentException> { store.save(preset.copy(id = "Bad Id")) }

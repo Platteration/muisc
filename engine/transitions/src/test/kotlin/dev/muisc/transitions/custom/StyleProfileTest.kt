@@ -4,6 +4,10 @@ import dev.muisc.transitions.DefaultStrategyRegistry
 import dev.muisc.transitions.TransitionPrefs
 import dev.muisc.transitions.planner.DefaultTransitionPlanner
 import dev.muisc.transitions.planner.TestAnalyses
+import dev.muisc.transitions.recipe.RecipeCatalog
+import dev.muisc.transitions.recipe.RecipeLibrary
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -73,16 +77,31 @@ class StyleProfileTest {
     }
 
     @Test
-    fun purIstNeverPicksAnEffectAndEnergyStylesMoveTheRanking() {
-        val registry = DefaultStrategyRegistry.default()
+    fun purIstNeverPicksAnEffectAndEnergyStylesMoveTheRanking(@TempDir userRecipes: File) {
+        // The registry every production planner uses (CLI, Lab, app): the built-ins plus the built-in recipes, plus
+        // user recipes. The user's echo recipe is tagged "plain": the style must go by what a recipe does, not its tags.
+        File(userRecipes, "my-dub.json").writeText(MY_DUB)
+        File(userRecipes, "my-segue.json").writeText(MY_SEGUE)
+        val registry = RecipeCatalog.registry(DefaultStrategyRegistry.default(), RecipeLibrary(userRecipes))
+        assertTrue(registry.strategy("recipe:my-dub") != null && registry.strategy("recipe:my-segue") != null, registry.strategyIds.toString())
         val planner = DefaultTransitionPlanner(registry)
         val purist = BuiltInStyles.byId("purist")!!.apply(TransitionPrefs())
-        val effects = setOf("echoOut", "filterSweep", "loopRollRiser", "brakeStop", "spectralFreezeBridge", "ambientBridge", "drumBreakBridge", "stemSwap")
+        val effects = setOf(
+            "echoOut", "filterSweep", "loopRollRiser", "brakeStop", "spectralFreezeBridge", "ambientBridge", "drumBreakBridge", "stemSwap",
+            // recipes with an echo, a reverb (freeze), filters, stems or a tempo glide
+            "recipe:echo-wash", "recipe:reverb-freeze-bridge", "recipe:filter-handoff", "recipe:tension-build", "recipe:drums-first",
+            "recipe:long-glide", "recipe:my-dub",
+        )
+        val plain = setOf("recipe:radio-segue", "recipe:my-segue")
+        val seenWithoutStyle = HashSet<String>()
+        val plainUnderPurist = HashSet<String>()
         val rnd = Random(8)
         repeat(40) { i ->
             val a = TestAnalyses.ref(TestAnalyses.random(rnd, "a$i"))
             val b = TestAnalyses.ref(TestAnalyses.random(rnd, "b$i"))
+            seenWithoutStyle += planner.plan(a, b, TransitionPrefs()).candidates.map { it.strategy.id }
             val r = planner.plan(a, b, purist)
+            plainUnderPurist += r.candidates.map { it.strategy.id }.filter { it in plain }
             assertTrue(r.candidates.none { it.strategy.id in effects }, r.candidates.map { it.strategy.id }.toString())
             assertTrue(r.candidates.all { it.modifiers.isEmpty() }, "no glides or texture beds")
             assertTrue(r.candidates.any { it.strategy.id == "crossfade" })
@@ -97,5 +116,38 @@ class StyleProfileTest {
         // Club's active preset reaches the bass swap's plan.
         val club = planner.plan(a, b, BuiltInStyles.byId("club")!!.apply(TransitionPrefs()))
         assertEquals("8", club.candidates.first { it.strategy.id == "bassSwap" }.plan.params["overlapBars"])
+        // Not vacuous: without a style the effect recipes are candidates, and purist still keeps the plain ones.
+        for (id in listOf("recipe:echo-wash", "recipe:reverb-freeze-bridge", "recipe:filter-handoff", "recipe:my-dub")) {
+            assertTrue(id in seenWithoutStyle, "$id is a candidate without a style: $seenWithoutStyle")
+        }
+        assertEquals(plain, plainUnderPurist, "level/EQ recipes stay allowed under purist")
+    }
+
+    companion object {
+        /** An echo-out as a user recipe, tagged "plain" to show that tags are not what the style goes by. */
+        const val MY_DUB = """{
+  "id": "my-dub", "name": "My dub", "ambition": 0.2, "tags": ["plain", "gentle"],
+  "vars": { "wet": { "default": 0.7, "min": 0, "max": 1 } },
+  "timing": { "lengthBars": 4, "tempo": "none", "align": "downbeat", "bEntersAtBar": "bars", "holdBars": 4 },
+  "rules": { "baseScore": 0.9 },
+  "a": {
+    "level": [ { "at": 0, "v": 1 }, { "at": "bars - beat", "v": 1, "curve": "sCurve" }, { "at": "bars", "v": 0 } ],
+    "echo": { "send": [ { "at": "bars - 1", "v": 0 }, { "at": "bars", "v": "wet" }, { "at": "bars + beat", "v": 0 } ],
+              "beats": 0.75, "feedback": 0.4, "returnLevel": 1 }
+  },
+  "b": { "level": [ { "at": "bars - beat", "v": 0, "curve": "sCurve" }, { "at": "bars", "v": 1 } ] }
+}"""
+
+        /** A plain fade with a mid dip: level and EQ only, no stretching. */
+        const val MY_SEGUE = """{
+  "id": "my-segue", "name": "My segue", "ambition": 0.1,
+  "timing": { "lengthBars": 4, "tempo": "none", "align": "downbeat", "bEntersAtBar": "bars - 1", "holdBars": 2 },
+  "rules": { "baseScore": 0.5 },
+  "a": {
+    "level": [ { "at": 0, "v": 1, "curve": "equalPower" }, { "at": "bars", "v": 0 } ],
+    "mid": [ { "at": "bars - 1", "v": 0, "curve": "sCurve" }, { "at": "bars", "v": -4 } ]
+  },
+  "b": { "level": [ { "at": "bars - 1 - beat", "v": 0, "curve": "sCurve" }, { "at": "bars - 1", "v": 1 } ] }
+}"""
     }
 }

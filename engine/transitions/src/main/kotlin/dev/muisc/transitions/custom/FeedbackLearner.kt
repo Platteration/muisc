@@ -99,15 +99,32 @@ data class LearnedFactor(val multiplier: Double, val ratings: Int, val bucket: C
  * lowers it symmetrically. Ratings of one bucket do not affect another.
  *
  * Deterministic: the state is a sorted table of tallies; no clock, no randomness. Thread-safe.
+ *
+ * The learner of a [FileFeedbackStore] follows its file: before every read ([tally], [factor], [table], [snapshot],
+ * [toJson]) it picks up ratings another store or process saved since, so a planner holding this learner sees them.
  */
 class FeedbackLearner(initial: Map<String, Map<String, RatingTally>> = emptyMap()) {
     private val tallies = sortedMapOf<String, java.util.SortedMap<String, RatingTally>>()
 
+    /** Set by [FileFeedbackStore]: brings the tallies up to date with the file. Called outside this object's lock. */
+    @Volatile internal var refresher: (() -> Unit)? = null
+
     init {
+        load(initial)
+    }
+
+    private fun load(initial: Map<String, Map<String, RatingTally>>) {
         for ((s, m) in initial) for ((b, t) in m) {
             require(t.n >= 0 && t.sum >= 0.0 && t.sum <= t.n + 1e-9) { "invalid tally for $s/$b: $t" }
             tallies.getOrPut(s) { sortedMapOf() }[b] = t
         }
+    }
+
+    /** Replaces every tally (used by [FileFeedbackStore] when the file changed). */
+    @Synchronized
+    internal fun replaceAll(next: Map<String, Map<String, RatingTally>>) {
+        tallies.clear()
+        load(next)
     }
 
     @Synchronized
@@ -119,8 +136,10 @@ class FeedbackLearner(initial: Map<String, Map<String, RatingTally>> = emptyMap(
 
     fun record(strategyId: String, features: PairFeatures, rating: Rating) = record(strategyId, ContextBucket.of(features), rating)
 
-    @Synchronized
-    fun tally(strategyId: String, bucket: ContextBucket): RatingTally = tallies[strategyId]?.get(bucket.key) ?: RatingTally()
+    fun tally(strategyId: String, bucket: ContextBucket): RatingTally {
+        refresher?.invoke()
+        return synchronized(this) { tallies[strategyId]?.get(bucket.key) ?: RatingTally() }
+    }
 
     fun factor(strategyId: String, bucket: ContextBucket): LearnedFactor {
         val t = tally(strategyId, bucket)
@@ -131,16 +150,31 @@ class FeedbackLearner(initial: Map<String, Map<String, RatingTally>> = emptyMap(
     fun factor(strategyId: String, features: PairFeatures): LearnedFactor = factor(strategyId, ContextBucket.of(features))
 
     /** Every rated (strategy, bucket) with its factor, sorted by strategy then bucket order. */
-    @Synchronized
-    fun table(): List<Pair<String, LearnedFactor>> = tallies.flatMap { (s, m) ->
-        ContextBucket.ALL.mapNotNull { b -> m[b.key]?.let { s to LearnedFactor(multiplier(it), it.n, b) } }
+    fun table(): List<Pair<String, LearnedFactor>> {
+        refresher?.invoke()
+        return synchronized(this) {
+            tallies.flatMap { (s, m) ->
+                ContextBucket.ALL.mapNotNull { b -> m[b.key]?.let { s to LearnedFactor(multiplier(it), it.n, b) } }
+            }
+        }
     }
 
     /** Copy of the raw tallies (strategy → bucket key → tally). */
-    @Synchronized
-    fun snapshot(): Map<String, Map<String, RatingTally>> = tallies.mapValues { (_, m) -> m.toSortedMap() }.toSortedMap()
+    fun snapshot(): Map<String, Map<String, RatingTally>> {
+        refresher?.invoke()
+        return current()
+    }
 
-    fun toJson(): String = CustomJson.json.encodeToString(FeedbackFile.serializer(), FeedbackFile(1, snapshot()))
+    @Synchronized
+    internal fun current(): Map<String, Map<String, RatingTally>> = tallies.mapValues { (_, m) -> m.toSortedMap() }.toSortedMap()
+
+    fun toJson(): String = encode(snapshot())
+
+    /** The file text of the tallies in memory, without refreshing them first. */
+    internal fun toJsonAsIs(): String = encode(current())
+
+    private fun encode(t: Map<String, Map<String, RatingTally>>): String =
+        CustomJson.json.encodeToString(FeedbackFile.serializer(), FeedbackFile(1, t))
 
     companion object {
         /** `K` of the Beta(K, K) prior: the number of neutral pseudo-ratings on each side. */
@@ -170,39 +204,96 @@ class FeedbackLearner(initial: Map<String, Map<String, RatingTally>> = emptyMap(
 internal data class FeedbackFile(val version: Int = 1, val strategies: Map<String, Map<String, RatingTally>> = emptyMap())
 
 /**
- * [FeedbackLearner] persisted in one JSON file, written atomically after every [record]. A file that cannot be read
- * starts an empty learner with a warning, and is moved aside (`feedback.json.corrupt`) before the first write so the
- * ratings in it are never overwritten.
+ * [FeedbackLearner] persisted in one JSON file, which is the source of truth when several stores share it (the Lab
+ * keeps one store for its lifetime while `muisc rate` or the app write the same file):
+ *
+ *  - [record] is a read-modify-write under [FileLocks] (an OS lock on `.feedback.json.lock`, shared with other
+ *    processes): it re-reads the file, adds the rating to what is on disk and writes the result atomically, so a
+ *    rating saved by another store or process is never overwritten;
+ *  - [learner] is one object for the store's lifetime whose reads re-load the file when it changed on disk
+ *    ([FileStamp]), so a planner holding it sees ratings made elsewhere.
+ *
+ * A file that cannot be read yields a warning; the learner keeps the last tallies it could read (none on the first
+ * load), and the file is moved aside (`feedback.json.corrupt`) before the next rating is written, so the ratings in
+ * it are never overwritten.
  */
 class FileFeedbackStore(val file: File) {
+    val learner: FeedbackLearner = FeedbackLearner()
+
+    /** What the tallies in [learner] were read from; null = the file was missing. Meaningful once [loaded]. */
+    private var stamp: FileStamp? = null
+    private var loaded = false
+    private var unreadable = false
+
+    @Volatile private var loadProblem: String? = null
+    @Volatile private var lockProblem: String? = null
+
+    /** Problems with the file as it is now (it is re-read when it changed) and with the last write's lock. */
     val warnings: List<String>
-    val learner: FeedbackLearner
-    private var unreadable: Boolean
+        get() {
+            refresh()
+            return listOfNotNull(loadProblem, lockProblem)
+        }
 
     init {
-        var problems = emptyList<String>()
-        var bad = false
-        learner = if (!file.isFile) FeedbackLearner() else try {
-            FeedbackLearner.fromJson(file.readText(Charsets.UTF_8))
-        } catch (e: Exception) {
-            bad = true
-            problems = listOf(
-                "cannot read feedback file ${file.path} (it will be kept as ${file.name}.corrupt on the next rating): " +
-                    (e.message?.lineSequence()?.firstOrNull() ?: e.javaClass.simpleName),
-            )
-            FeedbackLearner()
-        }
-        warnings = problems
-        unreadable = bad
+        refresh()
+        learner.refresher = ::refresh
     }
 
-    /** Records the rating and saves the file. */
+    /** Re-reads the file when it changed since the tallies in [learner] were read. */
+    @Synchronized
+    fun refresh() {
+        val now = FileStamp.of(file)
+        if (loaded && now == stamp) return
+        load(now)
+    }
+
+    private fun load(now: FileStamp?) {
+        loaded = true
+        stamp = now
+        if (now == null) {
+            learner.replaceAll(emptyMap()); unreadable = false; loadProblem = null
+            return
+        }
+        try {
+            learner.replaceAll(FeedbackLearner.fromJson(file.readText(Charsets.UTF_8)).current())
+            unreadable = false
+            loadProblem = null
+        } catch (e: Exception) {
+            if (!file.isFile) { // removed between the stat and the read
+                stamp = null; learner.replaceAll(emptyMap()); unreadable = false; loadProblem = null
+                return
+            }
+            unreadable = true
+            loadProblem = "cannot read feedback file ${file.path} (it will be kept as ${file.name}.corrupt on the next rating): " +
+                (e.message?.lineSequence()?.firstOrNull() ?: e.javaClass.simpleName)
+        }
+    }
+
+    /** Adds the rating to the ratings on disk and saves the file. */
     @Synchronized
     fun record(strategyId: String, features: PairFeatures, rating: Rating): LearnedFactor {
-        learner.record(strategyId, features, rating)
-        if (unreadable && file.isFile) AtomicFiles.preserve(file)
-        unreadable = false
-        AtomicFiles.write(file, learner.toJson() + "\n")
+        require(strategyId.isNotBlank()) { "strategy id is blank" }
+        FileLocks.withLock(file, onDegraded = { why ->
+            lockProblem = why?.let { "ratings in ${file.path} were saved without the inter-process lock ($it); a rating saved at the same moment by another program may be lost" }
+        }) {
+            load(FileStamp.of(file)) // what is on disk now, whatever the stamp says
+            var saved = false
+            try {
+                learner.record(strategyId, features, rating)
+                if (unreadable && file.isFile) AtomicFiles.preserve(file)
+                AtomicFiles.write(file, learner.toJsonAsIs() + "\n")
+                saved = true
+            } finally {
+                if (saved) {
+                    unreadable = false
+                    loadProblem = null
+                    stamp = FileStamp.of(file)
+                } else {
+                    loaded = false // the next read goes back to the file: memory never holds a rating that is not on disk
+                }
+            }
+        }
         return learner.factor(strategyId, features)
     }
 }
