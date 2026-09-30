@@ -74,11 +74,11 @@ class RecipeRenderEffectsTest {
     @Test
     fun echoSendRingsOnAfterALevelCut() {
         val pair = RecipeRenderTestSupport.near
-        fun rec(withEcho: Boolean) = recipe(
+        fun rec(withEcho: Boolean, sendClosesAt: Double = 4.5) = recipe(
             if (withEcho) "echo-out" else "cut-only", RecipeTempo.NONE,
             DeckRecipe(
                 level = listOf(pt(3.75, 1), pt(4, 0)),
-                echo = if (withEcho) EchoRecipe(send = listOf(pt(3, 0), pt(3.5, 1), pt(4.5, 1), pt(4.75, 0)), beats = e(0.75), feedback = e(0.6)) else null,
+                echo = if (withEcho) EchoRecipe(send = listOf(pt(3, 0), pt(3.5, 1), pt(sendClosesAt, 1), pt(sendClosesAt + 0.25, 0)), beats = e(0.75), feedback = e(0.6)) else null,
             ),
             DeckRecipe(level = listOf(pt(6, 0, RecipeCurve.EQUAL_POWER), pt(8, 1))),
             length = 8, hold = 1,
@@ -97,6 +97,12 @@ class RecipeRenderEffectsTest {
         assertTrue(rms(dry, 4.75, 5.0) < -90.0, "without the echo A is silent after the cut (${fmt(rms(dry, 4.75, 5.0))} dBFS)")
         assertTrue(justAfter > before - 20.0, "the tail is audible after the cut: ${fmt(justAfter)} dBFS vs ${fmt(before)} dBFS before it")
         assertTrue(later < justAfter - 3.0 && muchLater < later - 10.0, "and it decays: ${fmt(justAfter)} -> ${fmt(later)} -> ${fmt(muchLater)} dBFS")
+        // The send is taken before the fader: while A's fader is down (bar 4 on) the open send keeps feeding the
+        // echo, so a send that stays open half a bar longer leaves a clearly louder tail.
+        val early = render(rec(true, sendClosesAt = 3.75), pair, silenceB = true)
+        val earlyTail = rms(early, 5.0, 5.5)
+        val lateTail = rms(wet, 5.0, 5.5)
+        assertTrue(lateTail > earlyTail + 3.0, "pre-fader send: ${fmt(lateTail)} dBFS with the send open after the cut vs ${fmt(earlyTail)} dBFS closed at it")
         // Before the send opens the echo adds nothing: bars 1..2 are A untouched.
         val a1 = outFrame(wet, pair, echo, 1.0).toInt()
         var maxDiff = 0f
