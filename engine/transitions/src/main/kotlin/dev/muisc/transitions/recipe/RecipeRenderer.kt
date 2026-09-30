@@ -54,7 +54,9 @@ import kotlin.math.pow
  * Lanes are evaluated every [BLOCK] output frames from the frame's timeline bar (`match` / `glide`: through the
  * master grid, so a bar is a bar at whatever tempo; `none`: A's bar length), converted to their working domain
  * (linear gain for level and dB lanes, ln Hz for cutoffs), smoothed by a centred [SMOOTH_TAPS]-block moving average
- * (so even a `step` is a ~10 ms ramp and never clicks) and interpolated linearly per sample.
+ * (so even a `step` becomes a ~30 ms ramp) and interpolated linearly per sample. The ramp is that long on purpose:
+ * a gain that falls to silence within a few milliseconds of a transient cuts the transient short, which is
+ * audible (and measurable) as a tick even though the waveform has no discontinuity.
  *
  * ## Freeze
  * While a reverb's freeze lane is >= 0.5 the reverb is frozen ([FdnReverb.freeze]). Its input is faded out over the
@@ -78,8 +80,8 @@ internal object RecipeRenderer {
     /** Frames between two lane evaluations. */
     const val BLOCK = 64
 
-    /** Blocks in the centred moving average applied to every continuous lane (448 frames, ~10 ms at 44.1 kHz). */
-    const val SMOOTH_TAPS = 7
+    /** Blocks in the centred moving average applied to every continuous lane (1344 frames, ~30 ms at 44.1 kHz). */
+    const val SMOOTH_TAPS = 21
 
     /** Blocks over which a reverb's input is faded out before a freeze and back in after it. */
     const val FREEZE_GATE_BLOCKS = 8

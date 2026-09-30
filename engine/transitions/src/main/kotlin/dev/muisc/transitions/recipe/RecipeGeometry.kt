@@ -455,7 +455,9 @@ internal object RecipeGeometry {
             out += "boundary rule: $id is ${formatValue(lane.kind, v)} at bar 0 (neutral is ${formatValue(lane.kind, lane.kind.neutral)}); " +
                 if (lane.kind.isEffect) "the send feed fades in over ${RecipeRenderer.FADE_IN_FRAMES} frames" else "A is blended into the processed signal over ${BeatDomain.SEAM_BLEND_FRAMES} frames"
         }
-        val endBar = t.timelineBars
+        // The recipe's own `total` (the rendered timeline can be a hair shorter in `none` mode, from rounding to frames, or longer
+        // when the hold was raised to a whole bar); lanes hold their last value after their last point.
+        val endBar = max(r.totalBars, t.timelineBars)
         // B's sends and freezes are covered by the last-bar check below (effect tails are released, not blended).
         for ((id, lane) in deckLanes(r.b, DECK_B).filter { !it.second.kind.isEffect }) {
             val v = lane.valueAt(endBar)
