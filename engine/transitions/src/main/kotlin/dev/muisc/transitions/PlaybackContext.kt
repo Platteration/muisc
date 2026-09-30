@@ -64,6 +64,11 @@ data class TransitionPrefs(
     /** Engine sample rate everything is rendered at. */
     val sampleRate: Int = 44100,
     val channels: Int = 2,
+    /**
+     * Preset to use by default for a strategy (strategy id -> preset id, see `custom.StrategyPreset`). The planner
+     * applies the preset's values under [paramOverrides]: explicit overrides still win.
+     */
+    val activePresets: Map<String, String> = emptyMap(),
 )
 
 /** The gating rule: when do two consecutive queue items get a transition at all. */

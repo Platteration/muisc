@@ -16,6 +16,11 @@ import dev.muisc.transitions.TransitionPlan
 import dev.muisc.transitions.TransitionPlanner
 import dev.muisc.transitions.TransitionPrefs
 import dev.muisc.transitions.TransitionStrategy
+import dev.muisc.transitions.custom.PairPin
+import dev.muisc.transitions.custom.PlannerCustomization
+import dev.muisc.transitions.custom.PresetResolution
+import dev.muisc.transitions.custom.StrategyPreset
+import dev.muisc.transitions.sdk.StrategyTraits
 import java.security.MessageDigest
 import kotlin.math.abs
 
@@ -27,16 +32,25 @@ import kotlin.math.abs
  *  1. `applicability()` — skipped when blocked (or scored 0) and when listed in `prefs.disabledStrategies`
  *     (`crossfade` can never be disabled: it is the floor of the ladder);
  *  2. `plan()` with `Params.defaults(specs).withAll(prefs.paramOverrides[id])` — a strategy whose `plan()` throws
- *     is skipped and reported in the [PlanExplanation] (the ladder moves on, the pair still plans);
+ *     is skipped and reported in the [PlanExplanation] (the ladder moves on, the pair still plans). With an active
+ *     preset or a pin the params are layered as documented in [PresetResolution]: defaults ← active preset
+ *     (`prefs.activePresets[id]`) ← `prefs.paramOverrides[id]` ← the pin's preset ← the pin's params;
  *  3. every registered modifier with `applicability > `[MODIFIER_ATTACH_THRESHOLD] (and not disabled) adjusts
  *     the plan in registry order; its resolved params are written into `plan.params` under
  *     `"<modifierId>.<paramId>"` ([ModifierParams]) and its id appended to `plan.modifiers`;
- *  4. `score = fit × weight × energyPref × variety × modifierBonus × jitter` where
- *     `weight = prefs.strategyWeights[id] ?: 1`, `energyPref = 1 − |prefs.energy − ambition[id]| · 0.5`
- *     ([AMBITION]), `variety = 1 − prefs.varietyPenalty · [id == previousStrategyId]` (0 for the
+ *  4. `score = fit × weight × energyPref × variety × modifierBonus × jitter × learned` where
+ *     `weight = prefs.strategyWeights[id] ?: 1`, `energyPref = 1 − |prefs.energy − ambition| · 0.5` (ambition from
+ *     the strategy itself when it implements [StrategyTraits], else [AMBITION]), `variety = 1 − prefs.varietyPenalty · [id == previousStrategyId]` (0 for the
  *     [COOLDOWN_IDS] repeated back to back), `modifierBonus = 1 + Σ bonus[m] · applicability(m)` over the
  *     attached modifiers ([MODIFIER_BONUS]) and `jitter = 1 + `[JITTER]` · uniform(−1, 1)` seeded from
- *     `(a.fingerprint, b.fingerprint, seed, id)` — the same pair, seed and strategy always jitter identically.
+ *     `(a.fingerprint, b.fingerprint, seed, id)` — the same pair, seed and strategy always jitter identically, and
+ *     `learned` is the [customization]'s learned multiplier for the strategy in the pair's context bucket
+ *     (`custom.FeedbackLearner`, 0.5..1.5; exactly 1 without ratings or without a learner).
+ *
+ * **Pins.** When [customization] holds a [PairPin] for `(a.fingerprint, b.fingerprint)` and the pinned strategy
+ * produced a candidate, that candidate is ranked first whatever its score (the others stay best-first by score).
+ * When the pinned strategy is disabled, blocked, unknown or fails to plan, the normal ranking applies and
+ * [PlanExplanation.pin] says why the pin was not used.
  *
  * No minimum-score cut-off exists: the ranking *is* the escalation ladder. The result is never empty as long
  * as a never-blocked strategy (`crossfade`) is registered; otherwise [plan] throws [IllegalStateException].
@@ -47,11 +61,14 @@ import kotlin.math.abs
  *
  * @param stemQuality the best stem separator available to the renderer, used for the `s_stems` sub-score in the
  *   explanation (strategies apply their own gate); null = none.
+ * @param customization the user's presets, pins and learned weights; [PlannerCustomization.NONE] (the default)
+ *   leaves every score and ranking exactly as without customization.
  */
 class DefaultTransitionPlanner(
     val registry: StrategyRegistry,
     val pairAnalyzer: PairAnalyzer = DefaultPairAnalyzer(),
     val stemQuality: StemQuality? = StemQuality.PSEUDO,
+    val customization: PlannerCustomization = PlannerCustomization.NONE,
 ) : TransitionPlanner {
 
     override fun plan(a: TrackRef, b: TrackRef, prefs: TransitionPrefs, seed: Long, previousStrategyId: String?): RankedPlans =
@@ -67,8 +84,19 @@ class DefaultTransitionPlanner(
     fun planExplained(a: TrackRef, b: TrackRef, features: PairFeatures, prefs: TransitionPrefs, seed: Long = 0L, previousStrategyId: String? = null): ExplainedPlans {
         val scored = ArrayList<Pair<PlanCandidate, ScoreBreakdown>>(registry.strategies.size)
         val skipped = ArrayList<SkippedStrategy>()
+        val notes = ArrayList<String>()
+        val pin: PairPin? = customization.pins.pin(a.analysis.fingerprint, b.analysis.fingerprint)
+        val pinPreset: StrategyPreset? = pin?.presetId?.let { pid ->
+            val p = customization.presets.preset(pid)
+            when {
+                p == null -> { notes += "pin: preset '$pid' not found — the pinned ${pin.strategyId} uses its other params"; null }
+                p.strategyId != pin.strategyId -> { notes += "pin: preset '$pid' is for ${p.strategyId}, not ${pin.strategyId} — ignored"; null }
+                else -> p
+            }
+        }
         for (strategy in registry.strategies) {
             val id = strategy.id
+            val pinned = pin != null && pin.strategyId == id
             if (id in prefs.disabledStrategies && id != CROSSFADE_ID) { skipped += SkippedStrategy(id, "disabled in prefs"); continue }
             val app = try {
                 strategy.applicability(features, a.analysis, b.analysis, prefs)
@@ -78,7 +106,12 @@ class DefaultTransitionPlanner(
             if (!app.applicable) {
                 skipped += SkippedStrategy(id, if (app.blockers.isNotEmpty()) "blocked" else "score 0", app.blockers); continue
             }
-            val params = Params.defaults(strategy.params).withAll(prefs.paramOverrides[id].orEmpty())
+            val active = PresetResolution.active(id, prefs, customization.presets)
+            active.problem?.let { notes += it }
+            var overrides = active.preset?.params?.values.orEmpty() + prefs.paramOverrides[id].orEmpty()
+            if (pinned) overrides = overrides + pinPreset?.params?.values.orEmpty() + pin!!.params?.values.orEmpty()
+            val params = Params.defaults(strategy.params).withAll(overrides)
+            val allowedModifiers: List<String>? = if (pinned && pinPreset?.modifiers != null) pinPreset.modifiers else active.preset?.modifiers
             var plan = try {
                 strategy.plan(a.analysis, b.analysis, features, params, prefs, seed)
             } catch (e: RuntimeException) {
@@ -90,6 +123,7 @@ class DefaultTransitionPlanner(
             val attached = LinkedHashMap<TransitionModifier, Double>()
             for (m in registry.modifiers) {
                 if (m.id in prefs.disabledStrategies) continue
+                if (allowedModifiers != null && m.id !in allowedModifiers) continue
                 val mApp = m.applicability(features, a.analysis, b.analysis, strategy, prefs)
                 if (!(mApp > MODIFIER_ATTACH_THRESHOLD)) continue
                 val mParams = ModifierParams.defaults(m, prefs)
@@ -105,16 +139,24 @@ class DefaultTransitionPlanner(
             // --- score ---
             val fit = app.score.coerceIn(0.0, 1.0)
             val weight = (prefs.strategyWeights[id] ?: 1.0).coerceAtLeast(0.0)
-            val energyPref = energyPreference(id, prefs.energy)
+            val energyPref = energyPreference(strategy, prefs.energy)
             val variety = variety(id, previousStrategyId, prefs.varietyPenalty)
             val modifierBonus = 1.0 + attached.entries.sumOf { (m, mApp) -> (MODIFIER_BONUS[m.id] ?: DEFAULT_MODIFIER_BONUS) * mApp }
             val jitter = jitter(a.analysis.fingerprint, b.analysis.fingerprint, seed, id)
-            val score = fit * weight * energyPref * variety * modifierBonus * jitter
+            val learned = customization.learned(id, features)
+            val score = fit * weight * energyPref * variety * modifierBonus * jitter * learned.multiplier
+            val presetNote = when {
+                pinned && pinPreset != null -> "preset '${pinPreset.id}' (${pinPreset.name}) from your pin"
+                active.preset != null -> "preset '${active.preset.id}' (${active.preset.name}) active for $id"
+                else -> null
+            }
             val sub = CompatibilityScores.compute(id, features, prefs, a.analysis, stemQuality)
             val breakdown = ScoreBreakdown(
                 strategyId = id, subScores = sub, fit = fit, weight = weight, energyPref = energyPref, variety = variety,
                 modifierBonus = modifierBonus, jitter = jitter, score = score,
                 modifiers = attached.entries.associate { (m, v) -> m.id to v }, reasons = app.reasons, blockers = app.blockers,
+                learned = learned.multiplier, learnedNote = if (learned.ratings > 0) learned.describe() else null,
+                pinned = pinned, pinNote = if (pinned) pinText(pin!!) else null, presetNote = presetNote,
             )
             val explained = Applicability(app.score, reasons = app.reasons + breakdown.lines(), blockers = app.blockers)
             scored += PlanCandidate(strategy, explained, score, plan, attached.keys.toList()) to breakdown
@@ -125,10 +167,27 @@ class DefaultTransitionPlanner(
                     skipped.joinToString { "${it.strategyId} (${it.reason})" },
             )
         }
-        val ordered = scored.sortedByDescending { it.second.score } // stable: ties keep registry order
+        val byScore = scored.sortedByDescending { it.second.score } // stable: ties keep registry order
+        var pinOutcome: PinOutcome? = null
+        var ordered = byScore
+        if (pin != null) {
+            val at = byScore.indexOfFirst { it.second.pinned }
+            if (at >= 0) {
+                ordered = listOf(byScore[at]) + byScore.filterIndexed { i, _ -> i != at }
+                pinOutcome = PinOutcome(pin.strategyId, used = true, reason = pinText(pin) + if (at > 0) " — ranked first (its score alone ranks it #${at + 1})" else "", presetId = pinPreset?.id)
+            } else {
+                val why = skipped.firstOrNull { it.strategyId == pin.strategyId }?.let { sk ->
+                    sk.reason + if (sk.blockers.isNotEmpty()) ": " + sk.blockers.joinToString("; ") else ""
+                } ?: "no strategy '${pin.strategyId}' is registered"
+                pinOutcome = PinOutcome(pin.strategyId, used = false, reason = "pinned ${pin.strategyId} not used ($why) — normal ranking applies", presetId = pinPreset?.id)
+            }
+        }
         val ranked = RankedPlans(features, ordered.map { it.first })
-        return ExplainedPlans(ranked, PlanExplanation(features, ordered.map { it.second }, skipped))
+        return ExplainedPlans(ranked, PlanExplanation(features, ordered.map { it.second }, skipped, pinOutcome, notes.distinct()))
     }
+
+    private fun pinText(pin: PairPin): String =
+        "pinned by you" + if (pin.note.isNotBlank()) " (${pin.note})" else ""
 
     companion object {
         const val CROSSFADE_ID = "crossfade"
@@ -159,6 +218,14 @@ class DefaultTransitionPlanner(
         /** `1 − |energy − ambition| · 0.5`. */
         fun energyPreference(strategyId: String, energy: Double): Double =
             (1.0 - abs(energy.coerceIn(0.0, 1.0) - (AMBITION[strategyId] ?: DEFAULT_AMBITION)) * 0.5).coerceIn(0.0, 1.0)
+
+        /** The strategy's ambition: its own [StrategyTraits.ambition] (clamped to 0..1) when it has one, else [AMBITION] / [DEFAULT_AMBITION]. */
+        fun ambitionOf(strategy: TransitionStrategy): Double =
+            (strategy as? StrategyTraits)?.ambition?.takeIf { !it.isNaN() }?.coerceIn(0.0, 1.0) ?: (AMBITION[strategy.id] ?: DEFAULT_AMBITION)
+
+        /** [energyPreference] with the ambition taken from [ambitionOf]. */
+        fun energyPreference(strategy: TransitionStrategy, energy: Double): Double =
+            (1.0 - abs(energy.coerceIn(0.0, 1.0) - ambitionOf(strategy)) * 0.5).coerceIn(0.0, 1.0)
 
         /** `1 − varietyPenalty · [id == previous]`, 0 for a [COOLDOWN_IDS] strategy repeated back to back. */
         fun variety(strategyId: String, previousStrategyId: String?, varietyPenalty: Double): Double {

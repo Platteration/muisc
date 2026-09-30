@@ -5,8 +5,10 @@ import dev.muisc.transitions.RankedPlans
 
 /**
  * How one candidate's final score came about (DESIGN.md §5.3):
- * `score = fit × weight × energyPref × variety × modifierBonus × jitter`.
+ * `score = fit × weight × energyPref × variety × modifierBonus × jitter × learned`.
  * [reasons] / [blockers] are the strategy's own `Applicability` texts; [subScores] the planner's §5.2 recomputation.
+ * The customization fields ([learned], [pinned], the notes) keep their neutral defaults when the planner has no
+ * customization.
  */
 data class ScoreBreakdown(
     val strategyId: String,
@@ -28,21 +30,42 @@ data class ScoreBreakdown(
     val modifiers: Map<String, Double> = emptyMap(),
     val reasons: List<String> = emptyList(),
     val blockers: List<String> = emptyList(),
+    /** The learned multiplier from the user's ratings (0.5..1.5; 1 without ratings). */
+    val learned: Double = 1.0,
+    /** `"learned ×1.12 from 5 ratings in 'matched, in key, rising'"`; null when nothing was learned for this context. */
+    val learnedNote: String? = null,
+    /** True when the user pinned this strategy for the pair and the planner ranked it first. */
+    val pinned: Boolean = false,
+    /** `"pinned by you"` (with the pin's note) when [pinned]. */
+    val pinNote: String? = null,
+    /** Which preset supplied parameter values, e.g. `"preset 'tight-bass-swap' (Tight 8-bar bass swap) active for bassSwap"`. */
+    val presetNote: String? = null,
 ) {
-    /** `"score 0.412 = fit 0.60 × weight 1.00 × energy 0.85 × variety 1.00 × modifiers 1.00 × jitter 1.012"`. */
+    /**
+     * `"score 0.412 = fit 0.60 × weight 1.00 × energy 0.85 × variety 1.00 × modifiers 1.00 × jitter 1.012"`, followed
+     * by `" × learned 1.12"` when ratings contributed and `" · pinned (ranked first)"` for a pinned candidate.
+     */
     fun formula(): String =
         "score ${"%.3f".format(score)} = fit ${"%.2f".format(fit)} × weight ${"%.2f".format(weight)} × energy ${"%.2f".format(energyPref)}" +
-            " × variety ${"%.2f".format(variety)} × modifiers ${"%.2f".format(modifierBonus)} × jitter ${"%.3f".format(jitter)}"
+            " × variety ${"%.2f".format(variety)} × modifiers ${"%.2f".format(modifierBonus)} × jitter ${"%.3f".format(jitter)}" +
+            (if (learnedNote != null || learned != 1.0) " × learned ${"%.2f".format(learned)}" else "") +
+            (if (pinned) " · pinned (ranked first)" else "")
 
-    /** The lines appended to the candidate's `Applicability.reasons`: sub-scores, formula, modifiers. */
+    /** The lines appended to the candidate's `Applicability.reasons`: sub-scores, formula, modifiers, customization. */
     fun lines(): List<String> {
-        val out = ArrayList<String>(3)
+        val out = ArrayList<String>(6)
         out += "scores: " + subScores.summary()
         out += formula()
         if (modifiers.isNotEmpty()) out += "modifiers: " + modifiers.entries.joinToString(", ") { (id, app) -> "$id (${"%.2f".format(app)})" }
+        learnedNote?.let { out += it }
+        presetNote?.let { out += it }
+        pinNote?.let { out += it }
         return out
     }
 }
+
+/** What happened to the user's pin for the pair: used (ranked first) or not, and why. */
+data class PinOutcome(val strategyId: String, val used: Boolean, val reason: String, val presetId: String? = null)
 
 /** A registered strategy that produced no candidate, and why (disabled, blocked, or its `plan()` failed). */
 data class SkippedStrategy(val strategyId: String, val reason: String, val blockers: List<String> = emptyList())
@@ -56,6 +79,10 @@ data class PlanExplanation(
     /** Best first; index `i` explains `RankedPlans.candidates[i]`. */
     val ranked: List<ScoreBreakdown>,
     val skipped: List<SkippedStrategy> = emptyList(),
+    /** The pin for this pair and whether it was used; null when there was none. */
+    val pin: PinOutcome? = null,
+    /** Customization problems met while planning (a preset that could not be found, ...). */
+    val notes: List<String> = emptyList(),
 ) {
     fun breakdown(strategyId: String): ScoreBreakdown? = ranked.firstOrNull { it.strategyId == strategyId }
 
@@ -68,8 +95,13 @@ data class PlanExplanation(
             appendLine("     " + b.subScores.summary())
             if (b.modifiers.isNotEmpty()) appendLine("     modifiers: " + b.modifiers.entries.joinToString(", ") { (id, app) -> "$id (${"%.2f".format(app)})" })
             for (r in b.reasons) appendLine("     - $r")
+            b.learnedNote?.let { appendLine("     $it") }
+            b.presetNote?.let { appendLine("     $it") }
+            b.pinNote?.let { appendLine("     $it") }
         }
         for (s in skipped) appendLine("skipped ${s.strategyId}: ${s.reason}" + if (s.blockers.isNotEmpty()) " " + s.blockers else "")
+        pin?.let { appendLine("pin: ${it.reason}") }
+        for (n in notes) appendLine("note: $n")
     }
 }
 
