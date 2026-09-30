@@ -88,7 +88,12 @@ class LibraryResult(val ok: Boolean, val file: File?, val problems: List<RecipeP
  * When two user files define the same id, the first by file name is used and the other is reported.
  *
  * [save] writes atomically (a temporary file in the same directory, then a rename over the target), so a crash
- * never leaves a half-written recipe. It never overwrites a file that holds a different recipe or cannot be read.
+ * never leaves a half-written recipe. It never overwrites a file that holds a different recipe or cannot be read, and
+ * it writes nothing while more than one file holds the recipe's id.
+ *
+ * A file nested deeper than [RecipeCodec.MAX_NESTING] levels, or with an expression nested deeper than
+ * [Expr.MAX_DEPTH], is reported like any other bad file; a [StackOverflowError] while reading one file is caught
+ * and reported for that file too.
  */
 class RecipeLibrary(
     val userDir: File?,
@@ -147,9 +152,14 @@ class RecipeLibrary(
     }
 
     /**
-     * Saves [recipe] to [userDir] as `<id>.json` (or over the file that already holds this id). Refuses a recipe with
-     * errors unless [allowErrors], an id that is not a valid file name, and a target file that holds a different
-     * recipe or cannot be read. The result carries the validator's problems.
+     * Saves [recipe] to [userDir], choosing the file the way [load] and [delete] do: the user file whose recipe with
+     * this id is in use (ACTIVE; the first by file name), or, when no file's recipe with this id is in use, the only
+     * file holding the id (a draft with errors, being fixed); when no file holds the id, a new `<id>.json`.
+     *
+     * Refuses a recipe with errors unless [allowErrors], an id that is not a valid file name, a new `<id>.json` that
+     * already exists holding a different recipe or that cannot be read, and an id that more than one user file
+     * holds: which file to write is then ambiguous, so the error names the files and none is written (delete or
+     * rename the extra ones first). The result carries the validator's problems.
      */
     @Synchronized
     fun save(recipe: TransitionRecipe, allowErrors: Boolean = false): LibraryResult {
@@ -161,7 +171,18 @@ class RecipeLibrary(
         if (!report.valid && !allowErrors) {
             return LibraryResult(false, null, listOf(RecipeProblem.error("", "not saved: the recipe has errors")) + report.problems, recipe)
         }
-        val existing = loadUserFiles(dir).firstOrNull { it.second?.id == recipe.id }?.first
+        val holders = loadUser(ArrayList()).filter { it.id == recipe.id }
+        val inUse = holders.firstOrNull { it.active } ?: holders.singleOrNull()
+        val others = holders.filter { it !== inUse }
+        if (others.isNotEmpty()) {
+            val names = holders.joinToString(", ") { it.file?.name ?: it.source } + (inUse?.file?.let { " (in use: ${it.name})" } ?: " (none in use)")
+            return LibraryResult(
+                false, null,
+                listOf(RecipeProblem.error("", "not saved: ${holders.size} files hold the recipe '${recipe.id}': $names; delete or rename the ones you do not want, then save again")) + report.problems,
+                recipe,
+            )
+        }
+        val existing = inUse?.file
         val target = existing ?: File(dir, "${recipe.id}$SUFFIX")
         if (existing == null && target.exists()) {
             val held = RecipeCodec.parse(target).recipe
@@ -236,16 +257,19 @@ class RecipeLibrary(
             val name = raw.substringBefore('#').trim()
             if (name.isEmpty()) continue
             val path = "$resourceDir/$name"
-            val parsed = try {
-                classLoader.getResourceAsStream(path)?.use { RecipeCodec.parse(it) }
-            } catch (e: IOException) {
-                RecipeParseResult(null, listOf(RecipeProblem.error("", "cannot read: ${e.message}")))
-            }
-            if (parsed == null) {
-                problems += LibraryProblem(path, RecipeProblem.error("", "listed in $INDEX but missing"))
-                continue
-            }
-            entry(parsed, RecipeOrigin.BUILT_IN, path, null, problems)?.let { out += it }
+            guarded(path, problems) {
+                val parsed = try {
+                    classLoader.getResourceAsStream(path)?.use { RecipeCodec.parse(it) }
+                } catch (e: IOException) {
+                    RecipeParseResult(null, listOf(RecipeProblem.error("", "cannot read: ${e.message}")))
+                }
+                if (parsed == null) {
+                    problems += LibraryProblem(path, RecipeProblem.error("", "listed in $INDEX but missing"))
+                    null
+                } else {
+                    entry(parsed, RecipeOrigin.BUILT_IN, path, null, problems)
+                }
+            }?.let { out += it }
         }
         return out
     }
@@ -261,7 +285,7 @@ class RecipeLibrary(
             problems += LibraryProblem(dir.path, RecipeProblem.error("", "cannot list the user recipe directory"))
             return emptyList()
         }
-        return files.mapNotNull { f -> entry(RecipeCodec.parse(f), RecipeOrigin.USER, f.path, f, problems) }
+        return files.mapNotNull { f -> guarded(f.path, problems) { entry(RecipeCodec.parse(f), RecipeOrigin.USER, f.path, f, problems) } }
     }
 
     private fun entry(parsed: RecipeParseResult, origin: RecipeOrigin, source: String, file: File?, problems: MutableList<LibraryProblem>): RecipeEntry? {
@@ -282,9 +306,16 @@ class RecipeLibrary(
     private fun listJson(dir: File): List<File>? =
         dir.listFiles()?.filter { it.isFile && !it.name.startsWith(".") && it.name.endsWith(SUFFIX, ignoreCase = true) }?.sortedBy { it.name }
 
-    /** Every user file with the recipe it holds (null when unreadable). */
-    private fun loadUserFiles(dir: File): List<Pair<File, TransitionRecipe?>> =
-        (listJson(dir) ?: emptyList()).map { it to RecipeCodec.parse(it).recipe }
+    /**
+     * Reads one file with [read]. A [StackOverflowError] (a recursion the nesting limits of [RecipeCodec] and [Expr]
+     * do not cover) becomes one problem for [source] instead of ending [load].
+     */
+    private fun guarded(source: String, problems: MutableList<LibraryProblem>, read: () -> RecipeEntry?): RecipeEntry? = try {
+        read()
+    } catch (e: StackOverflowError) {
+        problems += LibraryProblem(source, RecipeProblem.error("", "this file is nested too deeply to be read (the reader ran out of stack); it is skipped"))
+        null
+    }
 
     private fun fail(message: String) = LibraryResult(false, null, listOf(RecipeProblem.error("", message)))
 

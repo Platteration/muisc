@@ -45,7 +45,24 @@ object RecipeResolver {
      * Resolves [recipe] with [params] (keyed by variable name; unknown keys are ignored, values clamped to the
      * variable's range). Throws [RecipeException] naming the offending field.
      */
-    fun resolve(recipe: TransitionRecipe, params: Params = Params.EMPTY, beatsPerBar: Int = 4): ResolvedRecipe {
+    fun resolve(recipe: TransitionRecipe, params: Params = Params.EMPTY, beatsPerBar: Int = 4): ResolvedRecipe =
+        resolve(recipe, params, beatsPerBar, null)
+
+    /** Timing values the geometry actually renders, bound in place of the recipe's own (see [resolveAsRendered]). */
+    internal class RenderedTiming(val bars: Double, val settle: Double, val hold: Double)
+
+    /**
+     * Resolves [recipe] as [resolve] does, but with `bars`, `settle` and `hold` (and so `total`) bound to [timing]:
+     * the whole bars a `match` / `glide` geometry renders after rounding and shortening. The timing fields
+     * (`lengthBars`, `settleBars`, `holdBars`, `bEntersAtBar`) are evaluated with the recipe's own values, as in
+     * [resolve]; every later expression (`bEntryOffsetBars`, the EQ crossovers, lanes, effect settings) sees the
+     * rendered ones, so a lane written against `total` ends on the rendered seam. ([RecipeGeometry.asRendered] then
+     * puts back the planned `bEntryOffsetBars`, which decided where B starts.)
+     */
+    internal fun resolveAsRendered(recipe: TransitionRecipe, params: Params, beatsPerBar: Int, timing: RenderedTiming): ResolvedRecipe =
+        resolve(recipe, params, beatsPerBar, timing)
+
+    private fun resolve(recipe: TransitionRecipe, params: Params, beatsPerBar: Int, rendered: RenderedTiming?): ResolvedRecipe {
         require(beatsPerBar >= 1) { "beatsPerBar must be >= 1" }
         if (recipe.format > TransitionRecipe.FORMAT_VERSION) {
             throw RecipeException("format", "recipe format ${recipe.format} is newer than this engine understands (${TransitionRecipe.FORMAT_VERSION})")
@@ -75,14 +92,19 @@ object RecipeResolver {
 
         // 2. Timing (in dependency order).
         val t = recipe.timing
-        val length = eval(t.lengthBars, "timing.lengthBars")
+        var length = eval(t.lengthBars, "timing.lengthBars")
         if (length < MIN_LENGTH_BARS || length > MAX_LENGTH_BARS) throw RecipeException("timing.lengthBars", "must be between ${MIN_LENGTH_BARS.toInt()} and ${MAX_LENGTH_BARS.toInt()} bars, got $length")
         scope["bars"] = length
-        val settle = eval(t.settleBars, "timing.settleBars").also { if (it < 0) throw RecipeException("timing.settleBars", "cannot be negative") }
-        val hold = eval(t.holdBars, "timing.holdBars").also { if (it < 0) throw RecipeException("timing.holdBars", "cannot be negative") }
+        var settle = eval(t.settleBars, "timing.settleBars").also { if (it < 0) throw RecipeException("timing.settleBars", "cannot be negative") }
+        var hold = eval(t.holdBars, "timing.holdBars").also { if (it < 0) throw RecipeException("timing.holdBars", "cannot be negative") }
         scope["settle"] = settle
         scope["hold"] = hold
         val bEntersAt = eval(t.bEntersAtBar, "timing.bEntersAtBar").also { if (it < 0) throw RecipeException("timing.bEntersAtBar", "cannot be negative") }
+        if (rendered != null) {
+            // The timing fields above were read with the recipe's own values; everything below sees the rendered ones.
+            length = rendered.bars; settle = rendered.settle; hold = rendered.hold
+            scope["bars"] = length; scope["settle"] = settle; scope["hold"] = hold
+        }
         val total = when (t.tempo) {
             RecipeTempo.NONE -> maxOf(length, bEntersAt) + hold
             else -> length + settle + hold

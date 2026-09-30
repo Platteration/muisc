@@ -16,6 +16,9 @@ import kotlinx.serialization.Serializable
  * Every position (`at`) is in **bars** from the start of the transition (bar 0). The overlap — both decks audible —
  * runs from bar 0 to `timing.lengthBars` (available in expressions as `bars`). In `match` / `glide` tempo mode B then
  * rides back to its own tempo for `settleBars` and holds it for `holdBars`; the whole timeline is `total` bars long.
+ * `match` / `glide` render whole bars (the overlap, settle and hold rounded, the hold at least 1, the overlap shortened
+ * when a song is too short); lanes and effect settings are then evaluated with the `bars`, `settle`, `hold` and
+ * `total` actually rendered, so a lane written against `total` ends on the seam.
  * Before bar 0 the segment plays a few thousand frames of A untouched and after `total` a few thousand frames of B
  * untouched (the splice guards), which is why the **boundary rule** below exists.
  *
@@ -65,7 +68,13 @@ data class TransitionRecipe(
     val a: DeckRecipe = DeckRecipe(),
     /** The incoming deck. */
     val b: DeckRecipe = DeckRecipe(),
-    /** Modifier ids the recipe asks for (e.g. `textureCarry`); attached whenever the modifier accepts the pair. */
+    /**
+     * Modifier ids the recipe REQUIRES (e.g. `textureCarry`): a recipe listing a modifier the registry does not have
+     * is left out ([RecipeCatalog]). The list does not choose what is attached: as for a built-in strategy, the
+     * planner attaches every installed modifier that accepts the pair (unless the listener or a preset turned it
+     * off), listed here or not. `tempoGlide` never accepts a recipe (the validator warns when it is listed); a recipe
+     * glides with `timing.tempo = glide`.
+     */
     val modifiers: List<String> = emptyList(),
 ) {
     /** The strategy id this recipe registers as. */

@@ -172,6 +172,37 @@ class RecipeValidatorTest {
         assertFalse(custom.validate(good.copy(modifiers = listOf("textureCarry"))).valid)
     }
 
+    /** tempoGlide never attaches to a recipe (it only accepts the built-in beat-domain strategies): listing it is a warning. */
+    @Test fun listingTempoGlideIsAWarning() {
+        val r = check(good.copy(modifiers = listOf("textureCarry", "tempoGlide")))
+        assertTrue(r.valid, r.toString())
+        val w = r.warning("modifiers[1]")
+        assertTrue(w.message.contains("timing.tempo") && w.message.contains("glide"), w.toString())
+        check(good.copy(modifiers = listOf("textureCarry"))).noneAt("modifiers[0]")
+        // A validator that does not know tempoGlide reports it as unknown, not with this warning.
+        val custom = RecipeValidator(knownModifiers = setOf("textureCarry")).validate(good.copy(modifiers = listOf("tempoGlide")))
+        assertTrue(custom.errors.single { it.path == "modifiers[0]" }.message.contains("unknown modifier"), custom.toString())
+    }
+
+    /** match / glide render whole bars: a fractional (or possibly fractional) settle, hold or length is a warning. */
+    @Test fun fractionalBarsInBeatModesAreAWarning() {
+        val settle = check(good.copy(timing = good.timing.copy(settleBars = Expr("2.4"))))
+        assertTrue(settle.valid, settle.toString())
+        assertTrue(settle.warning("timing.settleBars").message.contains("rendered as 2 bars"), settle.toString())
+        val hold = check(good.copy(timing = good.timing.copy(holdBars = Expr("0"))))
+        assertTrue(hold.warning("timing.holdBars").message.contains("rendered as 1 bar"), hold.toString())
+        // A continuous knob can take any value in its range, so the length can be fractional.
+        val knob = check(good.copy(vars = linkedMapOf("len" to RecipeVar(16.0, 8.0, 32.0)), timing = good.timing.copy(lengthBars = Expr("len"))))
+        assertTrue(knob.warning("timing.lengthBars").message.contains("'len'"), knob.toString())
+        // Only at some settings: len / 2 with an odd len.
+        val half = check(good.copy(vars = linkedMapOf("len" to RecipeVar(16.0, 8.0, 31.0, integer = true)), timing = good.timing.copy(settleBars = Expr("len / 8"))))
+        assertTrue(half.warning("timing.settleBars").setting == "len = 31", half.toString())
+        // `none` tempo renders fractional bars as written.
+        val none = check(good.copy(timing = good.timing.copy(tempo = RecipeTempo.NONE, lengthBars = Expr("8.5"), holdBars = Expr("1.5"))))
+        none.noneAt("timing.lengthBars"); none.noneAt("timing.holdBars")
+        check(good).noneAt("timing.settleBars")
+    }
+
     @Test fun stemsAreAWarning() {
         val r = check(good.copy(b = good.b.copy(stems = StemsRecipe(drums = listOf(p("0", "0"), p("4", "0"))))))
         assertTrue(r.valid, r.toString())
@@ -193,6 +224,14 @@ class RecipeValidatorTest {
         assertTrue(r.error("timing.lengthBars").message.contains("overlap length"), r.toString())
         // A division that is only zero for some values is not a syntax error.
         check(good.copy(b = good.b.copy(mid = listOf(p("0", "-12 / (len - 15)"), p("4", "0"))))).noneAt("b.mid[0].v")
+    }
+
+    /** An expression nested deeper than [Expr.MAX_DEPTH] is an error at its path, not a StackOverflowError. */
+    @Test fun deeplyNestedExpressionsAreErrorsNotCrashes() {
+        val parens = check(good.copy(timing = good.timing.copy(lengthBars = Expr("(".repeat(3000) + "len" + ")".repeat(3000)))))
+        assertTrue(parens.error("timing.lengthBars").message.contains("nested"), parens.toString())
+        val signs = check(good.copy(b = good.b.copy(mid = listOf(p("0", "-".repeat(200_000) + "1")))))
+        assertTrue(signs.error("b.mid[0].v").message.contains("nested"), signs.toString().take(2000))
     }
 
     @Test fun resolverRefusalsAreErrorsWithTheirPath() {

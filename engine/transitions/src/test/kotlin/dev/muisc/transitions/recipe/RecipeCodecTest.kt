@@ -140,6 +140,26 @@ class RecipeCodecTest {
         }
     }
 
+    /**
+     * A file nested far deeper than the recipe schema (about five levels) is one problem with its line and column,
+     * not a StackOverflowError: the reader stops at [RecipeCodec.MAX_NESTING] levels.
+     */
+    @Test fun deepNestingIsAProblemNotACrash() {
+        val deep = RecipeCodec.parse("{\n  \"id\": \"x\",\n  \"tags\": " + "[".repeat(5000) + "]".repeat(5000) + "\n}")
+        val p = only(deep)
+        assertTrue(p.message.contains("nested more than ${RecipeCodec.MAX_NESTING} levels deep"), p.toString())
+        // The root object is level 1, so the first list past the limit opens at column 11 + MAX_NESTING - 1 of line 3.
+        assertEquals(3 to 10 + RecipeCodec.MAX_NESTING, p.line to p.column)
+        // Exactly at the limit the reader carries on (the shape check then refuses lists inside a list of tags).
+        fun nested(levels: Int) = "{\"id\": \"x\", \"name\": \"X\", \"tags\": " + "[".repeat(levels - 1) + "]".repeat(levels - 1) + "}"
+        val atLimit = RecipeCodec.parse(nested(RecipeCodec.MAX_NESTING))
+        assertTrue(atLimit.problems.none { it.message.contains("nested") }, atLimit.problems.toString())
+        assertTrue(only(RecipeCodec.parse(nested(RecipeCodec.MAX_NESTING + 1))).message.contains("nested"))
+        // Objects count as well as lists.
+        val objects = "{\"a\": ".repeat(RecipeCodec.MAX_NESTING + 1) + "1" + "}".repeat(RecipeCodec.MAX_NESTING + 1)
+        assertTrue(only(RecipeCodec.parse(objects)).message.contains("nested"))
+    }
+
     @Test fun unreadableFileIsAProblem() {
         val r = RecipeCodec.parse(File("/definitely/not/here.json"))
         assertNull(r.recipe)

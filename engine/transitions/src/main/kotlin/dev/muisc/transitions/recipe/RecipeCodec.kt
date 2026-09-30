@@ -102,6 +102,13 @@ class RecipeParseResult(
  */
 object RecipeCodec {
 
+    /**
+     * How deeply objects and lists may nest, counting the recipe object itself as level 1 (the format needs about
+     * five). Deeper is a syntax problem with its line and column: the reader is recursive, and without a limit a few
+     * thousand `[` overflow the stack.
+     */
+    const val MAX_NESTING: Int = 64
+
     /** Parses [text] (UTF-8 BOM tolerated). */
     fun parse(text: String): RecipeParseResult {
         val src = text.removePrefix("﻿")
@@ -306,6 +313,7 @@ object RecipeCodec {
 
     private class JsonReader(val s: String, val lines: LineIndex, val positions: MutableMap<String, TextPosition>) {
         var i = 0
+        private var depth = 0
 
         fun readDocument(): JsonElement {
             skipWs()
@@ -324,8 +332,11 @@ object RecipeCodec {
             skipWs()
             if (i >= s.length) throw JsonSyntax(i, "the file ends too early (a value is missing)")
             return when (val c = s[i]) {
-                '{' -> obj(path)
-                '[' -> arr(path)
+                '{', '[' -> {
+                    if (depth >= MAX_NESTING) throw JsonSyntax(i, "the recipe is nested more than $MAX_NESTING levels deep here (the format needs about five); remove the extra '$c'")
+                    depth++
+                    try { if (c == '{') obj(path) else arr(path) } finally { depth-- }
+                }
                 '"' -> JsonPrimitive(string())
                 't' -> literal("true", JsonPrimitive(true))
                 'f' -> literal("false", JsonPrimitive(false))

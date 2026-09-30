@@ -56,6 +56,34 @@ class RecipeLibraryTest {
         assertTrue(set.problems.none { it.source.endsWith("notes.txt") || it.source.endsWith(".hidden.json") })
     }
 
+    /**
+     * A pathologically nested file (JSON 5000 lists deep, or an expression 3000 parentheses deep) is one problem
+     * entry; the good recipe next to it still loads. Before the nesting limits this threw StackOverflowError out of
+     * load().
+     */
+    @Test fun aDeeplyNestedFileNeverBlocksTheOthers() {
+        write(RecipeLibrary.starter("aaa-good"))
+        val deepJson = write("bbb-deep.json", "{\n  \"id\": \"bbb\",\n  \"name\": \"B\",\n  \"tags\": " + "[".repeat(5000) + "]".repeat(5000) + "\n}")
+        val deepExpr = write(
+            RecipeLibrary.starter("ccc-deep").copy(timing = RecipeTiming(lengthBars = Expr("(".repeat(3000) + "len" + ")".repeat(3000)))),
+        )
+        val deepSigns = write(
+            RecipeLibrary.starter("ddd-signs").copy(b = RecipeLibrary.starter("x").b.copy(mid = listOf(RecipePoint(Expr.of(0), Expr("-".repeat(200_000) + "1"))))),
+        )
+        val set = library().load()
+        assertEquals(builtInIds + listOf("aaa-good"), set.active.map { it.id })
+        val json = set.problems.single { it.source == deepJson.path }
+        assertTrue(json.problem.message.contains("nested"), json.toString())
+        assertEquals(4, json.problem.line)
+        assertEquals(RecipeStatus.INVALID, set.all("ccc-deep").single().status)
+        val expr = set.problems.single { it.source == deepExpr.path && it.problem.isError }
+        assertEquals("timing.lengthBars", expr.problem.path)
+        assertTrue(expr.problem.message.contains("nested"), expr.toString())
+        assertTrue(expr.problem.line != null, "located in the file: $expr")
+        assertEquals(RecipeStatus.INVALID, set.all("ddd-signs").single().status)
+        assertTrue(set.problems.any { it.source == deepSigns.path && it.problem.path == "b.mid[0].v" && it.problem.message.contains("nested") }, set.problems.toString())
+    }
+
     @Test fun anUnreadableUserLocationIsReportedAndBuiltInsStillLoad() {
         tmp.mkdirs()
         val notADir = File(tmp, "recipes").apply { writeText("oops") }
@@ -119,6 +147,52 @@ class RecipeLibraryTest {
         assertTrue(library().save(RecipeLibrary.starter("my-mix", "Renamed")).ok)
         assertEquals("Renamed", RecipeCodec.parse(odd).recipe!!.name)
         assertFalse(File(userDir, "my-mix.json").exists())
+    }
+
+    /**
+     * `a-draft.json` (id foo, has errors) sorts before `foo.json` (id foo, valid): load() uses foo.json. Saving foo
+     * must not write over the draft (before the fix it did, and foo.json became DUPLICATE). With two files holding
+     * the id, save refuses, names both files and changes neither.
+     */
+    @Test fun saveNeverOverwritesADraftThatIsNotTheFileInUse() {
+        val draft = write(RecipeLibrary.starter("foo", "My draft").copy(ambition = 3.0), "a-draft.json")
+        val active = write(RecipeLibrary.starter("foo", "Good Foo"), "foo.json")
+        val lib = library()
+        val before = lib.load()
+        assertEquals(active, before["foo"]!!.file)
+        assertEquals(RecipeStatus.INVALID, before.all("foo").single { it.file == draft }.status)
+        val draftText = draft.readText()
+        val activeText = active.readText()
+
+        val saved = lib.save(RecipeLibrary.starter("foo", "Edited Foo"))
+        assertFalse(saved.ok, saved.toString())
+        assertNull(saved.file)
+        val why = saved.problems.first { it.isError }.message
+        assertTrue(why.contains("a-draft.json") && why.contains("foo.json"), why)
+        assertEquals(draftText, draft.readText(), "the draft is untouched")
+        assertEquals(activeText, active.readText(), "the file in use is untouched")
+        assertEquals("Good Foo", lib.load()["foo"]!!.recipe.name)
+
+        // Once only the file in use holds the id, save writes over it (whatever its name).
+        assertTrue(draft.delete())
+        val renamed = write(RecipeLibrary.starter("foo", "Good Foo"), "Odd Foo.json").also { assertTrue(active.delete()) }
+        val ok = lib.save(RecipeLibrary.starter("foo", "Edited Foo"))
+        assertTrue(ok.ok, ok.toString())
+        assertEquals(renamed, ok.file)
+        assertEquals("Edited Foo", lib.load()["foo"]!!.recipe.name)
+        assertEquals(listOf("Odd Foo.json"), userDir.list()!!.sorted())
+    }
+
+    /** A single file holding the id is the file in use even while it has errors, so fixing a draft saves over it. */
+    @Test fun saveFixesTheOnlyFileHoldingTheIdEvenWhenItIsInvalid() {
+        val draft = write(RecipeLibrary.starter("foo", "Draft").copy(ambition = 3.0), "my draft.json")
+        val lib = library()
+        assertEquals(RecipeStatus.INVALID, lib.load().all("foo").single().status)
+        val fixed = lib.save(RecipeLibrary.starter("foo", "Fixed"))
+        assertTrue(fixed.ok, fixed.toString())
+        assertEquals(draft, fixed.file)
+        assertEquals("Fixed", lib.load()["foo"]!!.recipe.name)
+        assertEquals(listOf("my draft.json"), userDir.list()!!.sorted())
     }
 
     @Test fun saveRefusesWhatWouldLoseData() {

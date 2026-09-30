@@ -110,7 +110,8 @@ internal sealed class RecipeTimeline(val sampleRate: Int, val beatsPerBar: Int) 
  *   the downbeat at or before the mix-out cue), overlap = `round(lengthBars)` bars. `match` writes the base grid
  *   (overlap at A's tempo, S-curve settle to B's tempo over `settleBars`, hold `holdBars`); `glide` writes a glide
  *   grid (A's tempo to B's across the overlap, then B's tempo for `settleBars + holdBars`). Settle and hold are
- *   rounded to whole bars and the hold is at least one bar, so the seam is always at stretch ratio 1.0.
+ *   rounded to whole bars and the hold is at least one bar, so the seam is always at stretch ratio 1.0. The lanes
+ *   are then evaluated with the bars actually rendered ([asRendered]).
  * - `none`: A's grid defines the timeline; A plays unstretched from its chosen start; B plays unstretched with its
  *   entry downbeat (mix-in cue + `bEntryOffsetBars` of B's own bars) on timeline bar `bEntersAtBar`.
  */
@@ -140,17 +141,20 @@ internal object RecipeGeometry {
         notes += "recipe '${recipe.name}' (${recipe.id} v${recipe.version}), tempo mode ${resolved.tempo.name.lowercase()}, align ${resolved.align.name.lowercase()}: " +
             "${fmt(resolved.lengthBars)}-bar overlap, timeline ${fmt(resolved.totalBars)} bars"
         if (resolved.vars.isNotEmpty()) notes += "variables: " + resolved.vars.entries.joinToString(", ") { (k, v) -> "$k = ${fmt(v)}" }
-        val stemNeed = stemNeed(resolved)
         val plan = when (resolved.tempo) {
             RecipeTempo.MATCH, RecipeTempo.GLIDE -> planBeatDomain(strategyId, resolved, a, b, features, base, prefs, notes)
             RecipeTempo.NONE -> planNone(strategyId, resolved, a, b, base, prefs, notes)
         }
         val timeline = timeline(plan, resolved, a, b, features, prefs)
-        notes += describeLanes(resolved)
-        notes += describeEffects(resolved, timeline)
-        if (stemNeed != StemNeed.NONE) notes += "stem lanes on ${deckNames(resolved)}: stems are separated from the decoded window(s) (pseudo-stems unless an ML separator is installed), applied, and summed back before the EQ"
-        notes += boundaryIssues(resolved, timeline).map { "warning: $it" }
-        val lanes = timelineLanes(timeline, a) + recipeLanes(resolved, timeline)
+        // From here on the lanes are evaluated with the bars actually rendered (see asRendered).
+        val (r, renderedNote) = asRendered(recipe, plan.params, resolved, timeline)
+        renderedNote?.let { notes += it }
+        val stemNeed = stemNeed(r)
+        notes += describeLanes(r)
+        notes += describeEffects(r, timeline)
+        if (stemNeed != StemNeed.NONE) notes += "stem lanes on ${deckNames(r)}: stems are separated from the decoded window(s) (pseudo-stems unless an ML separator is installed), applied, and summed back before the EQ"
+        notes += boundaryIssues(r, timeline).map { "warning: $it" }
+        val lanes = timelineLanes(timeline, a) + recipeLanes(r, timeline)
         return plan.copy(stemNeed = stemNeed, lanes = lanes, notes = notes)
     }
 
@@ -171,8 +175,8 @@ internal object RecipeGeometry {
     ): TransitionPlan {
         val bpb = a.grid.beatsPerBar.coerceAtLeast(1)
         val matched = BeatDomain.matchedGrid(b.grid, f.tempoRelation)
-        val settle = r.settleBars.roundToInt().coerceAtLeast(0)
-        val hold = r.holdBars.roundToInt().coerceAtLeast(1)
+        val settle = wholeSettle(r)
+        val hold = wholeHold(r)
         if (settle.toDouble() != r.settleBars) notes += "settle ${fmt(r.settleBars)} bars rounded to $settle (the master grid moves in whole bars)"
         if (hold.toDouble() != r.holdBars) notes += "hold ${fmt(r.holdBars)} bars -> $hold (whole bars, at least one at B's own tempo before the seam)"
         val bStart = BeatDomain.chooseBStart(b, matched, f.tempoRelation, r.bEntryOffsetBars, notes)
@@ -208,6 +212,41 @@ internal object RecipeGeometry {
         notes += layout.describe()
         notes += "B stretch at entry ${"%.2f".format((layout.bRatioStart - 1.0) * 100.0)} %, ratio 1.0 at the seam"
         return layout.applyTo(provisional, emptyList())
+    }
+
+    /** `match` / `glide`: the settle the master grid renders (whole bars, not negative). */
+    fun wholeSettle(r: ResolvedRecipe): Int = r.settleBars.roundToInt().coerceAtLeast(0)
+
+    /** `match` / `glide`: the hold the master grid renders (whole bars, at least one at B's own tempo before the seam). */
+    fun wholeHold(r: ResolvedRecipe): Int = r.holdBars.roundToInt().coerceAtLeast(1)
+
+    /**
+     * [r] with `bars`, `settle`, `hold` and `total` bound to what [t] renders, plus a note saying so when they differ
+     * from the recipe's own values (null note: nothing changed).
+     *
+     * `none`: the timeline is the recipe's own (to the frame), so [r] is returned. `match` / `glide`: `bars` is the
+     * overlap A is actually audible for (rounded to whole bars, shortened when A or B is too short), `total` is the
+     * master grid's length, `settle` is [wholeSettle] (capped to what is left) and `hold` the rest. The recipe is then
+     * resolved again with those values ([RecipeResolver.resolveAsRendered]), so lanes written against `bars` and
+     * `total` land on the rendered overlap and seam. `bEntryOffsetBars` keeps its planned value (it decided where B
+     * starts). If the recipe does not resolve with the rendered values, [r] is kept and the note says why.
+     */
+    fun asRendered(recipe: TransitionRecipe, params: Params, r: ResolvedRecipe, t: RecipeTimeline): Pair<ResolvedRecipe, String?> {
+        if (t !is RecipeTimeline.Beat) return r to null
+        val bpb = t.beatsPerBar.toDouble()
+        val bars = t.layout.aBeats / bpb
+        val total = t.layout.totalBeats / bpb
+        val settle = minOf(wholeSettle(r).toDouble(), max(0.0, total - bars))
+        val hold = total - bars - settle
+        if (bars == r.lengthBars && settle == r.settleBars && hold == r.holdBars) return r to null
+        val asked = "the recipe gives bars = ${fmt(r.lengthBars)}, settle = ${fmt(r.settleBars)}, hold = ${fmt(r.holdBars)}, total = ${fmt(r.totalBars)}"
+        return try {
+            val again = RecipeResolver.resolveAsRendered(recipe, params, r.beatsPerBar, RecipeResolver.RenderedTiming(bars, settle, hold))
+            again.copy(bEntryOffsetBars = r.bEntryOffsetBars) to
+                "lanes are placed with bars = ${fmt(bars)}, settle = ${fmt(settle)}, hold = ${fmt(hold)}, total = ${fmt(total)}, the whole bars rendered ($asked)"
+        } catch (e: RecipeException) {
+            r to "lanes are placed with the recipe's own values ($asked), not the ${fmt(total)} bars rendered: with the rendered values ${e.message}"
+        }
     }
 
     private fun planNone(strategyId: String, r: ResolvedRecipe, a: TrackAnalysis, b: TrackAnalysis, base: Params, prefs: TransitionPrefs, notes: MutableList<String>): TransitionPlan {
@@ -455,9 +494,11 @@ internal object RecipeGeometry {
             out += "boundary rule: $id is ${formatValue(lane.kind, v)} at bar 0 (neutral is ${formatValue(lane.kind, lane.kind.neutral)}); " +
                 if (lane.kind.isEffect) "the send feed fades in over ${RecipeRenderer.FADE_IN_FRAMES} frames" else "A is blended into the processed signal over ${BeatDomain.SEAM_BLEND_FRAMES} frames"
         }
-        // The recipe's own `total` (the rendered timeline can be a hair shorter in `none` mode, from rounding to frames, or longer
-        // when the hold was raised to a whole bar); lanes hold their last value after their last point.
-        val endBar = max(r.totalBars, t.timelineBars)
+        // Where the rendered timeline ends. `none` renders the recipe's `total` rounded to a frame, and match / glide lanes are
+        // resolved with the rendered bars (see asRendered), so within one output frame this is `total` itself; otherwise
+        // (lanes kept against a different `total`) it is the rendered end, and B is checked there.
+        val framesPerBar = t.beatPeriodAt(t.endFrame - 1) * t.beatsPerBar
+        val endBar = if (abs(t.timelineBars - r.totalBars) * framesPerBar <= 1.0) r.totalBars else t.timelineBars
         // B's sends and freezes are covered by the last-bar check below (effect tails are released, not blended).
         for ((id, lane) in deckLanes(r.b, DECK_B).filter { !it.second.kind.isEffect }) {
             val v = lane.valueAt(endBar)
@@ -476,10 +517,14 @@ internal object RecipeGeometry {
 
     private val LaneKind.isEffect: Boolean get() = this == LaneKind.SEND || this == LaneKind.FREEZE
 
-    /** Largest value of [lane] over `[from, to]` (its points inside plus both ends). */
+    /**
+     * Largest value of [lane] over `[from, to]`: its value at both ends plus its points strictly after [from] and up
+     * to [to]. A point AT [from] only counts through `valueAt(from)`, so at a vertical step on [from] the later point
+     * wins, as everywhere else (a freeze released by a step at `total - 1` is off for the whole last bar).
+     */
     fun maxOver(lane: ResolvedLane, from: Double, to: Double): Double {
         var m = max(lane.valueAt(from), lane.valueAt(to))
-        for (p in lane.points) if (p.bar in from..to) m = max(m, p.value)
+        for (p in lane.points) if (p.bar > from && p.bar <= to) m = max(m, p.value)
         return m
     }
 

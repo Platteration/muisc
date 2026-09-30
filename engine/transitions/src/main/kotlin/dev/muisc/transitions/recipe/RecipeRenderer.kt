@@ -106,8 +106,10 @@ internal object RecipeRenderer {
         val prefs = ctx.prefs
         val sr = ctx.sampleRate
         val bpb = a.grid.beatsPerBar.coerceAtLeast(1)
-        val r = RecipeResolver.resolve(recipe, plan.params, bpb)
-        val t = RecipeGeometry.timeline(plan, r, a, b, input.features, prefs)
+        val asWritten = RecipeResolver.resolve(recipe, plan.params, bpb)
+        val t = RecipeGeometry.timeline(plan, asWritten, a, b, input.features, prefs)
+        // Lanes are evaluated with the bars the timeline renders, exactly as the plan's lanes were.
+        val r = RecipeGeometry.asRendered(recipe, plan.params, asWritten, t).first
         val g = t.g
         val ch = input.aAudio.channelCount
         val warnings = ArrayList<String>(RecipeGeometry.boundaryIssues(r, t))

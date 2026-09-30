@@ -41,4 +41,24 @@ class ExprTest {
         assertFailsWith<ExprException> { ev("") }
         assertFailsWith<ExprException> { ev("3 4") }
     }
+
+    /** Parentheses, function calls and signs nest at most [Expr.MAX_DEPTH] deep; deeper is an [ExprException], not a StackOverflowError. */
+    @Test fun deepNestingIsAnErrorNotACrash() {
+        val parens = assertFailsWith<ExprException> { ev("(".repeat(3000) + "1" + ")".repeat(3000)) }
+        assertTrue(parens.message!!.contains("nested more than ${Expr.MAX_DEPTH} levels deep"), parens.message)
+        assertEquals(Expr.MAX_DEPTH, parens.position)
+        val signs = assertFailsWith<ExprException> { ev("-".repeat(200_000) + "1") }
+        assertTrue(signs.message!!.contains("nested"), signs.message)
+        // The message quotes a long source shortened, not all 200,001 characters.
+        assertTrue(signs.message!!.length < 300 && signs.source.length == 200_001, signs.message)
+        assertFailsWith<ExprException> { ev("max(".repeat(3000) + "1" + ")".repeat(3000)) }
+        // names() never throws, whatever the input.
+        assertEquals(emptySet(), Expr("-".repeat(200_000) + "1").names())
+        // Up to the limit, deep expressions still evaluate.
+        val d = Expr.MAX_DEPTH
+        assertEquals(1.0, ev("(".repeat(d - 1) + "1" + ")".repeat(d - 1)))
+        assertFailsWith<ExprException> { ev("(".repeat(d) + "1" + ")".repeat(d)) }
+        assertEquals(-1.0, ev("-".repeat(d - 2) + "-1"))
+        assertFailsWith<ExprException> { ev("-".repeat(d) + "1") }
+    }
 }

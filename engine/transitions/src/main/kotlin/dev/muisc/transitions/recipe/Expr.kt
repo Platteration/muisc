@@ -59,10 +59,23 @@ value class Expr(val source: String) {
 
         /** Functions available in expressions: name to arity (-1 = variadic, at least 1). */
         val FUNCTIONS: Map<String, Int> = mapOf("min" to -1, "max" to -1, "clamp" to 3, "abs" to 1, "round" to 1, "floor" to 1, "ceil" to 1)
+
+        /**
+         * How deeply parentheses, function calls and signs (`-`, `+`) may nest, counting the expression itself as
+         * level 1. Deeper is an [ExprException]: the parser is recursive, and without a limit a few thousand `(` or
+         * `-` overflow the stack.
+         */
+        const val MAX_DEPTH: Int = 64
     }
 
     private class Parser(private val s: String, private val scope: (String) -> Double?) {
         private var i = 0
+        private var depth = 0
+
+        /** Enters one nesting level (the expression, a parenthesis, a function's arguments or a sign); leave with `depth--`. */
+        private fun enter() {
+            if (++depth > MAX_DEPTH) fail("the expression is nested more than $MAX_DEPTH levels deep (parentheses, function calls and signs)")
+        }
 
         fun parseAll(): Double {
             if (s.isBlank()) fail("empty expression")
@@ -73,6 +86,11 @@ value class Expr(val source: String) {
         }
 
         private fun expr(): Double {
+            enter()
+            try { return sum() } finally { depth-- }
+        }
+
+        private fun sum(): Double {
             var v = term()
             while (true) {
                 skipWs()
@@ -98,8 +116,12 @@ value class Expr(val source: String) {
 
         private fun unary(): Double {
             skipWs()
-            if (peek() == '-') { i++; return -unary() }
-            if (peek() == '+') { i++; return unary() }
+            if (peek() == '-' || peek() == '+') {
+                val negate = peek() == '-'
+                i++
+                enter()
+                try { return if (negate) -unary() else unary() } finally { depth-- }
+            }
             return primary()
         }
 
@@ -166,7 +188,12 @@ value class Expr(val source: String) {
 
 /** A syntax or evaluation error in an [Expr], with the character position it refers to. */
 class ExprException(val source: String, val position: Int, message: String) :
-    IllegalArgumentException("$message in \"$source\" at column ${position + 1}")
+    IllegalArgumentException("$message in \"${quoted(source)}\" at column ${position + 1}") {
+    private companion object {
+        /** Sources longer than 80 characters are shortened in the message (the full text is [source]). */
+        fun quoted(source: String): String = if (source.length <= 80) source else source.take(77) + "..."
+    }
+}
 
 /** JSON: an [Expr] is read from a number or a string, and written back as a number when it is one. */
 object ExprSerializer : KSerializer<Expr> {

@@ -38,12 +38,17 @@ This page documents the format and what `RecipeValidator` checks. The format its
   know. If your file has errors it does not replace anything: the built-in stays in use.
 
 - **Broken files never block the others.** A file that cannot be read, is not valid JSON, or contains a recipe
-  with errors is reported and skipped; every other recipe still loads. If two of your files use the same id, the
-  first by file name is used and the other is reported.
+  with errors is reported and skipped; every other recipe still loads. That includes a file nested absurdly deep:
+  more than 64 levels of `{` / `[` (a recipe needs about five), or an expression with more than 64 levels of
+  parentheses, function calls and signs, is reported with its line and column like any other mistake. If two of
+  your files use the same id, the first by file name whose recipe has no errors is used and the others are reported.
 
-- **Saving** (from the library, e.g. `muisc recipe new`) writes a temporary file next to the target and renames it
-  over the target, so a crash never leaves a half-written recipe. It refuses to overwrite a file that holds a
-  different recipe or cannot be read.
+- **Saving** (from the library, e.g. `muisc recipe new`, the Lab or the app's import) writes the file that holds
+  the recipe in use for that id (whatever its name); if no file holds the id, it writes `<id>.json`; if one file
+  holds it but has errors (a draft being fixed), it writes that file. When more than one file holds the id, saving
+  refuses and names the files, so you can delete or rename the ones you do not want; nothing is written. It writes
+  a temporary file next to the target and renames it over the target, so a crash never leaves a half-written
+  recipe, and it refuses to overwrite a `<id>.json` that holds a different recipe or cannot be read.
 
 ## A complete example
 
@@ -118,7 +123,13 @@ This is the built-in `club-bass-swap`. JSON cannot hold comments, so the notes f
 | `timing` | object | see below | how the songs are lined up |
 | `rules` | object | see below | which pairs it suits |
 | `a`, `b` | object | untouched | the outgoing and the incoming deck |
-| `modifiers` | list of text | `[]` | modifier ids to attach whenever the modifier accepts the pair: `tempoGlide`, `textureCarry` |
+| `modifiers` | list of text | `[]` | modifier ids the recipe **requires**: if one is not installed, the recipe is not used. The list does not choose what is attached (see below) |
+
+**Modifiers.** As with the built-in techniques, every installed modifier that accepts the pair is attached to a
+recipe (unless the listener or a preset has turned it off), whether the recipe lists it or not; listing one only
+makes the recipe unavailable where that modifier is missing. `textureCarry` attaches to recipes this way.
+`tempoGlide` never attaches to a recipe (it only works on the built-in beat-matched techniques), and the validator
+warns when a recipe lists it: for a tempo glide, set `timing.tempo` to `"glide"`.
 
 ### Knobs (`vars`)
 
@@ -149,12 +160,20 @@ A value set for a knob is clamped into `min..max` (and rounded when `integer`).
 The whole timeline is `total` bars long: `bars + settle + hold` in `match` / `glide`, and
 `max(bars, bEntersAtBar) + hold` in `none`.
 
+**Whole bars in `match` / `glide`.** The master grid moves in whole bars: the overlap, `settleBars` and `holdBars`
+are rounded to whole bars, the hold is at least 1, and the overlap is shortened when A or B has too little music
+for it. Lanes, effect settings and the EQ crossovers are then evaluated with the `bars`, `settle`, `hold` and
+`total` actually rendered (the plan notes say so when they differ), so a lane written against `bars` or `total`
+still lands on the end of the overlap and on the seam. A knob used directly in a lane is not adjusted, and a
+position written as a plain number stays where it is; the validator warns when one of the three timing fields is
+rendered as a different number of bars at a checked setting, or uses a knob that is not a whole-number knob.
+
 ### `rules`
 
 | field | default | meaning |
 |---|---|---|
 | `requiresBeatMatch` | true for `match` / `glide`, false for `none` | needs confident beat grids on both songs |
-| `maxStretchPercent` | the listener's max-stretch setting | largest tempo difference, in percent, it accepts (not negative) |
+| `maxStretchPercent` | `match` / `glide`: the listener's max-stretch setting; `none`: no limit (nothing is stretched) | largest tempo difference, in percent, it accepts (not negative) |
 | `maxKeyDistance` | any | largest Camelot distance (after the best allowed pitch shift) it accepts (not negative) |
 | `outro` | any | allowed outro types of A: `HARD_STOP`, `FADE_OUT`, `BEAT_OUTRO`, `AMBIENT_OUTRO`, `VOCAL_OUTRO`, `UNKNOWN` |
 | `intro` | any | allowed intro types of B: `BEAT_INTRO`, `AMBIENT_INTRO`, `VOCAL_INTRO`, `COLD_START`, `SILENCE`, `UNKNOWN` |
@@ -222,6 +241,9 @@ Anywhere a number goes you can write an expression in quotes: `"bars - 1"`, `"sw
 | `settle`, `hold` | `settleBars`, `holdBars` | `bEntersAtBar`, `bEntryOffsetBars`, the EQ crossovers, lanes, deck settings |
 | `total` | the whole timeline | `bEntryOffsetBars`, the EQ crossovers, lanes, deck settings |
 
+Parentheses, function calls and signs (`-`, `+`) may nest up to 64 levels deep, counting the expression itself as
+the first level; deeper is an error.
+
 ## The boundary rule
 
 A transition is spliced between the two songs: just before it the listener hears A exactly as recorded, just
@@ -238,7 +260,11 @@ Breaking the boundary rule is an error. Two related things are warnings, because
 - Deck A is only played during the overlap, so its `level` should reach 0 by `bars`. If it does not, the renderer
   stops A with a short declick fade.
 - Echo and reverb sends, and the reverb freeze, should be back to 0 at least one bar before `total`, so the tail can
-  die away. If not, the renderer cuts the tail with a fade.
+  die away. A vertical step down at `total - 1` counts (at that bar the later point wins). If not, the renderer
+  cuts the tail with a fade.
+
+When a render breaks one of these (deck B is checked where the rendered segment actually ends), the render report
+carries a `boundary rule:` warning, and the plan notes say it too.
 
 ## Tempo modes
 
@@ -253,14 +279,14 @@ Breaking the boundary rule is an error. Two related things are warnings, because
 `muisc recipe validate <file>...` reads each file and explains every problem with its path (`a.level[2].v`), and
 the line and column in the file. It exits with 1 when any file has errors.
 
-Reading the file reports JSON mistakes (with line and column), unknown keys (with a *did you mean* suggestion), and
-values of the wrong type. Then the recipe is checked:
+Reading the file reports JSON mistakes (with line and column, including objects and lists nested more than 64
+levels deep), unknown keys (with a *did you mean* suggestion), and values of the wrong type. Then the recipe is checked:
 
 **Errors** (the recipe is not used): an id that is not `[a-z0-9-]+`; a blank name; `ambition`, `baseScore` or the
 energy deltas out of range; `minEnergyDelta` above `maxEnergyDelta`; negative `maxStretchPercent` or
 `maxKeyDistance`; a format newer than the engine; knob names that are not identifiers or are built-in names; a knob
 with `min` above `max` or its default outside its range; unknown names or syntax errors in any expression (every
-one is reported, not just the first); a lane value outside its range; a point before bar 0 or after `total`; the
+one is reported, not just the first; nesting deeper than 64 levels is one); a lane value outside its range; a point before bar 0 or after `total`; the
 boundary rule; echo feedback outside 0..0.95 or echo `beats` not above 0; `resonance` outside 0.5..6; `dampHz`
 outside 20..20000; `returnLevel` outside 0..2; reverb `decaySec` not above 0; an unknown modifier; and anything the
 timing checks refuse (overlap outside 1..64 bars, negative settle/hold/bEntersAtBar, crossovers out of order).
@@ -269,7 +295,9 @@ timing checks refuse (overlap outside 1..64 bars, negative settle/hold/bEntersAt
 lanes (they need stem separation: without an ML separator Muisc uses pseudo-stems, which leak, so a stem handover
 sounds more like a staggered EQ mix); a knob no expression uses; a knob whose `min` equals its `max`; a whole-number
 knob with fractional limits; points out of time order; `bEntersAtBar` set outside `none` tempo; a gap between A and
-B in `none` tempo; a modifier listed twice. When installing a file would replace a built-in, `validate` says so.
+B in `none` tempo; a modifier listed twice; `tempoGlide` in `modifiers`; in `match` / `glide`, a `lengthBars`,
+`settleBars` or `holdBars` that is rendered as a different number of whole bars, or that uses a knob that is not a
+whole-number knob. When installing a file would replace a built-in, `validate` says so.
 
 **Every setting.** A recipe has to work wherever the knobs are set, not only at their defaults. The checks that
 depend on the knobs run at the defaults, with each knob alone at its minimum and at its maximum (the others at

@@ -30,8 +30,10 @@ import kotlin.test.assertTrue
 /**
  * The strategy contract (DESIGN.md §9), run for every strategy in [DefaultStrategyRegistry.default] and every shipped
  * recipe over a pair
- * matrix of four 16-bar synthetic tracks (12 ordered pairs). A strategy merged into the registry is covered
- * automatically. For every pair the strategy declares itself applicable to, with default params:
+ * matrix of four 16-bar synthetic tracks (12 ordered pairs) plus two pairs of drums-end-to-end tracks (14 pairs). A
+ * strategy merged into the registry is covered automatically, and each one must be applicable to at least one pair
+ * (the "exercised on at least one pair" test; skipped when `-Dmuisc.contract.pairs` narrows the set), so none
+ * passes without being planned and rendered. For every pair the strategy declares itself applicable to, with default params:
  * the plan is valid, the render's length is within ±1 % of `expectedOutputFrames`, [SpliceCheck] is clean, the
  * [ArtifactDetector] finds no click, the peak is ≤ 0 dBFS, no sample is NaN/Inf, and rendering twice is
  * bit-identical.
@@ -50,7 +52,18 @@ class StrategyContractTest {
         "t126Am" to SyntheticSong(bpm = 126.0, tonic = 9, mode = Mode.MINOR, bars = 16, introBars = 4, outroBars = 4),
         "t63G" to SyntheticSong(bpm = 63.0, tonic = 7, mode = Mode.MAJOR, bars = 16, introBars = 4, outroBars = 4, outroFade = true),
         "t140Fs" to SyntheticSong(bpm = 140.0, tonic = 6, mode = Mode.MAJOR, bars = 16, introBars = 0, outroBars = 4),
+        // Drums from the first beat to the last (no intro, no outro), as in the CLI's GoldenCorpus.EXTRA_SONGS: without
+        // them drumBreakBridge (needs a percussive A tail) and recipe:tension-build (needs a B that starts on the beat)
+        // apply to none of the pairs above. Only paired with each other (EXTRA_PAIRS).
+        "t124D0" to SyntheticSong(bpm = 124.0, tonic = 2, mode = Mode.MAJOR, bars = 16, introBars = 0, outroBars = 0),
+        "t128Bm0" to SyntheticSong(bpm = 128.0, tonic = 11, mode = Mode.MINOR, bars = 16, introBars = 0, outroBars = 0),
     )
+
+    /** The songs every ordered pair of which is checked. */
+    private val matrixSongs = listOf("t120C", "t126Am", "t63G", "t140Fs")
+
+    /** Pairs checked in addition to the matrix. */
+    private val extraPairs = listOf("t124D0" to "t128Bm0", "t128Bm0" to "t124D0")
 
     private val tracks: Map<String, SyntheticTrack> by lazy { songs.mapValues { (id, song) -> loader.register(song, id) } }
 
@@ -61,7 +74,8 @@ class StrategyContractTest {
 
     private fun selectedPairs(): List<Pair<SyntheticTrack, SyntheticTrack>> {
         val all = ArrayList<Pair<SyntheticTrack, SyntheticTrack>>()
-        for (a in tracks.values) for (b in tracks.values) if (a !== b) all += a to b
+        for (a in matrixSongs) for (b in matrixSongs) if (a != b) all += tracks.getValue(a) to tracks.getValue(b)
+        for ((a, b) in extraPairs) all += tracks.getValue(a) to tracks.getValue(b)
         val prop = System.getProperty("muisc.contract.pairs")?.trim().orEmpty()
         if (prop.isEmpty()) return all
         prop.toIntOrNull()?.let { return all.take(it) }
@@ -80,12 +94,27 @@ class StrategyContractTest {
     fun contract(): List<DynamicNode> {
         val pairs = selectedPairs()
         val separator = PseudoStemSeparator()
+        // Coverage is only meaningful over the whole pair set, not when -Dmuisc.contract.pairs narrows it.
+        val wholeSet = System.getProperty("muisc.contract.pairs")?.trim().isNullOrEmpty()
         return selectedStrategies().map { strategy ->
             val tests = pairs.map { (a, b) ->
                 DynamicTest.dynamicTest("${a.id} > ${b.id}") { check(strategy, a, b, separator) }
             }
-            DynamicContainer.dynamicContainer(strategy.id, tests)
+            val coverage = if (!wholeSet) emptyList() else listOf(
+                DynamicTest.dynamicTest("exercised on at least one pair") { assertExercised(strategy, pairs) },
+            )
+            DynamicContainer.dynamicContainer(strategy.id, tests + coverage)
         }
+    }
+
+    /** A strategy applicable to none of the pairs passes every pair test without planning or rendering anything. */
+    private fun assertExercised(strategy: TransitionStrategy, pairs: List<Pair<SyntheticTrack, SyntheticTrack>>) {
+        val exercised = pairs.filter { (a, b) -> strategy.applicability(pairAnalyzer.features(a.analysis, b.analysis, prefs), a.analysis, b.analysis, prefs).applicable }
+        println("${strategy.id}: contract exercised on ${exercised.size} of ${pairs.size} pairs")
+        assertTrue(
+            exercised.isNotEmpty(),
+            "${strategy.id} is applicable to none of the ${pairs.size} contract pairs, so the contract never plans or renders it; add a song it applies to",
+        )
     }
 
     private fun check(strategy: TransitionStrategy, a: SyntheticTrack, b: SyntheticTrack, separator: PseudoStemSeparator) {

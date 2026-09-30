@@ -6,6 +6,7 @@ import dev.muisc.transitions.modifiers.TextureCarryModifier
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.round
+import kotlin.math.roundToInt
 
 /** What [RecipeValidator.validate] found. [valid] means no errors (warnings allowed). */
 class RecipeReport(val recipe: TransitionRecipe, val problems: List<RecipeProblem>) {
@@ -26,7 +27,10 @@ class RecipeReport(val recipe: TransitionRecipe, val problems: List<RecipeProble
  *
  * **Warnings** leave the recipe usable: deck A still audible when the overlap ends (the renderer declicks it), an
  * echo/reverb send or reverb freeze still on within the last bar (the renderer force-releases the tail), stem lanes
- * (they need stem separation; pseudo-stems leak), knobs that no expression uses, points written out of time order.
+ * (they need stem separation; pseudo-stems leak), knobs that no expression uses, points written out of time order,
+ * `tempoGlide` in [TransitionRecipe.modifiers] (it never attaches to a recipe), and, in `match` / `glide`, a
+ * `lengthBars`, `settleBars` or `holdBars` that is rendered as a different number of whole bars (at a checked
+ * setting, or because it uses a knob that is not a whole-number knob).
  *
  * **Every setting.** A recipe must work for every knob position the user can choose, not only its defaults, so the
  * setting-dependent checks run at: the defaults; each variable alone at its minimum and at its maximum (the others
@@ -137,6 +141,12 @@ class RecipeValidator(
                 out.error("modifier", "modifiers[$i]", "unknown modifier '$m'$hint; $known")
             } else if (!seenMods.add(m)) {
                 out.warning("modifier-dup", "modifiers[$i]", "'$m' is listed twice")
+            } else if (m == TempoGlideModifier.ID) {
+                out.warning(
+                    "modifier-glide", "modifiers[$i]",
+                    "tempoGlide never attaches to a recipe (it only works on the built-in beat-matched techniques), so listing it only makes the " +
+                        "recipe unavailable where tempoGlide is not installed; for a tempo glide set timing.tempo to \"glide\" and remove it from this list",
+                )
             }
         }
 
@@ -156,6 +166,22 @@ class RecipeValidator(
         // Timing fields that do nothing in this tempo mode.
         if (r.timing.tempo != RecipeTempo.NONE && r.timing.bEntersAtBar.literal != 0.0) {
             out.warning("unused-timing", "timing.bEntersAtBar", "bEntersAtBar is only used in \"none\" tempo; in \"${tempoName(r.timing.tempo)}\" B always enters at bar 0 of the overlap")
+        }
+
+        // match / glide render whole bars: a timing field that uses a continuous knob can be fractional.
+        if (r.timing.tempo != RecipeTempo.NONE) {
+            val continuous = r.vars.filter { (n, v) -> IDENTIFIER.matches(n) && n !in RecipeResolver.RESERVED && !v.integer && v.min < v.max }.keys
+            for ((path, e) in listOf("timing.lengthBars" to r.timing.lengthBars, "timing.settleBars" to r.timing.settleBars, "timing.holdBars" to r.timing.holdBars)) {
+                val knobs = e.names().filter { it in continuous }
+                if (knobs.isEmpty()) continue
+                val field = path.removePrefix("timing.")
+                out.warning(
+                    "whole-bars", path,
+                    "${knobs.joinToString(" and ") { "'$it'" }} can take any value in its range, so $field can be fractional; in \"${tempoName(r.timing.tempo)}\" " +
+                        "the master grid moves in whole bars and rounds it, and lanes then see the rounded bars and total. Make ${if (knobs.size == 1) "it a" else "them"} " +
+                        "whole-number knob${if (knobs.size == 1) "" else "s"} (\"integer\": true)",
+                )
+            }
         }
         return resolvable
     }
@@ -387,6 +413,28 @@ class RecipeValidator(
                 if (!(v.decaySec > 0.0)) out.error("range", "$name.reverb.decaySec", "the reverb decay is ${fmt(v.decaySec)} s; it must be more than 0", s)
                 if (!(v.dampHz in 20.0..20000.0)) out.error("range", "$name.reverb.dampHz", "dampHz is ${fmt(v.dampHz)} Hz; it must be between 20 and 20000", s)
                 if (!(v.returnLevel in 0.0..2.0)) out.error("range", "$name.reverb.returnLevel", "returnLevel is ${fmt(v.returnLevel)}; it must be between 0 and 2", s)
+            }
+        }
+
+        // match / glide: the master grid renders whole bars (and a hold of at least one), and lanes are placed with those.
+        if (res.tempo != RecipeTempo.NONE) {
+            val bars = res.lengthBars.roundToInt().coerceAtLeast(1)
+            val settle = RecipeGeometry.wholeSettle(res)
+            val hold = RecipeGeometry.wholeHold(res)
+            val renderedTotal = bars + settle + hold
+            for ((path, written, rendered) in listOf(
+                Triple("timing.lengthBars", res.lengthBars, bars),
+                Triple("timing.settleBars", res.settleBars, settle),
+                Triple("timing.holdBars", res.holdBars, hold),
+            )) {
+                if (written == rendered.toDouble()) continue
+                val why = if (path == "timing.holdBars" && written < 0.5) "at least one bar is held at B's own tempo before the seam" else "the master grid moves in whole bars"
+                out.warning(
+                    "whole-bars", path,
+                    "${path.removePrefix("timing.")} is ${fmt(written)}, which is rendered as $rendered bar${if (rendered == 1) "" else "s"}: in \"${tempoName(res.tempo)}\" $why. " +
+                        "Lanes are placed with the rendered values (total = $renderedTotal rather than ${fmt(total)}); write a whole number to place them exactly",
+                    s,
+                )
             }
         }
 
