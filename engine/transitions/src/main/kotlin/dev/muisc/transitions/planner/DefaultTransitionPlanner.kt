@@ -169,7 +169,7 @@ class DefaultTransitionPlanner(
 
         /** `1 + JITTER · u`, `u ∈ [−1, 1)` derived from SHA-256 of the fingerprints, the seed and the strategy id. */
         fun jitter(fingerprintA: String, fingerprintB: String, seed: Long, strategyId: String): Double {
-            val digest = MessageDigest.getInstance("SHA-256").digest("$fingerprintA $fingerprintB $seed $strategyId".toByteArray(Charsets.UTF_8))
+            val digest = MessageDigest.getInstance("SHA-256").digest("$fingerprintA\u0000$fingerprintB\u0000$seed\u0000$strategyId".toByteArray(Charsets.UTF_8))
             var bits = 0L
             for (i in 0 until 8) bits = (bits shl 8) or (digest[i].toLong() and 0xFF)
             val unit = (bits ushr 11).toDouble() / (1L shl 53).toDouble() // [0, 1)
