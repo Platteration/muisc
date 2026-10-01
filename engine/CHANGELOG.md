@@ -67,7 +67,11 @@ pre-approved; anything else needs a one-line request below and the lead's approv
   the live fallback still uses the causal one. Renders of those strategies and recipes change.
 - Metrics: `beatAlignmentMaxMs` is removed and replaced by `beatAlignmentP90Ms`; `beatAlignment*` now compare the
   render's articulated beats with the sources' attacks, and are absent when no beat has both.
-  `ArtifactMetrics.beatAlignment` takes an optional input. `Signals.onsetTimesSec` (internal) was removed.
+  `ArtifactMetrics.beatAlignment` takes an optional input. `Signals.onsetTimesSec` (internal) was removed. With
+  sources, every counted beat is also checked above 2 kHz, so a deck played late on beats both decks share is caught
+  (a beat's error is the larger of the full-band and high-band errors, and high-band errors count only when at least
+  10 % of the beats, and at least 2, have one). Values can only rise, and only when sources are given. A late deck
+  with no high-band attacks in the overlap can still pass.
 - `PlanCandidate.pinned: Boolean = false` (additive, defaulted; part of equality and `copy()`), set by
   `DefaultTransitionPlanner` for a used pin (stored, session or one-off).
 - `DefaultProgramBuilder.room(...)`, `roomOrder(...)` and `Room` (new): candidates that leave both neighbours their
