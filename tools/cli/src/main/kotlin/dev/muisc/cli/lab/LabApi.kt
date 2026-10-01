@@ -396,7 +396,15 @@ class LabApi(
                     }
                 }
             }
-            put("formula", "weight = 0.5 + (${FeedbackLearner.PRIOR_STRENGTH} + Σ rating) / (${2 * FeedbackLearner.PRIOR_STRENGTH} + n)")
+            // FeedbackLearner.multiplier with the app's only implicit signal, a skip (a down-vote, value 0).
+            val k = FeedbackLearner.PRIOR_STRENGTH
+            val iw = FeedbackLearner.IMPLICIT_WEIGHT
+            val cap = FeedbackLearner.IMPLICIT_CAP
+            put(
+                "formula",
+                "weight = 0.5 + ($k + Σ rating) / (${2 * k} + n + W), W = min($iw × skips, $cap): " +
+                    "each skip counts as $iw of a down-vote, all skips together as at most $cap",
+            )
         }
     }
 

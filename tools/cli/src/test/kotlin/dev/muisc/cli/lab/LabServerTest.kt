@@ -547,6 +547,41 @@ class LabServerTest {
         assertEquals(400, post("/api/ratings", buildJsonObject { put("a", t[3]); put("b", t[0]); put("strategy", "phraseCut"); put("rating", "meh") }).status)
     }
 
+    /**
+     * The Ratings panel prints `formula` above the table, so every row's weight must be what that formula gives for
+     * the row's own ratings, mean and skips. A row with skips only (as the app writes it with "Learn from skips")
+     * used to read ×0.92 under a formula without skips, which gives ×1.00 for no ratings.
+     */
+    @Test
+    fun `the ratings formula gives every row's weight, skips included`() {
+        val features = lab.features(lab.track(t[1]).ref, lab.track(t[2]).ref, lab.prefs(null))
+        repeat(3) { lab.profile.feedback.recordImplicit("bassSwap", features) }
+        val res = get("/api/ratings").json
+        val k = dev.muisc.transitions.custom.FeedbackLearner.PRIOR_STRENGTH
+        val iw = dev.muisc.transitions.custom.FeedbackLearner.IMPLICIT_WEIGHT
+        val cap = dev.muisc.transitions.custom.FeedbackLearner.IMPLICIT_CAP
+        assertEquals(
+            "weight = 0.5 + ($k + Σ rating) / (${2 * k} + n + W), W = min($iw × skips, $cap): " +
+                "each skip counts as $iw of a down-vote, all skips together as at most $cap",
+            res["formula"]!!.jsonPrimitive.content,
+        )
+        val rows = res["ratings"]!!.jsonArray.map { it.jsonObject }
+        val bucket = dev.muisc.transitions.custom.ContextBucket.of(features).label
+        val skipRow = rows.single { it["strategy"]!!.jsonPrimitive.content == "bassSwap" && it["bucket"]!!.jsonPrimitive.content == bucket }
+        assertEquals(0, skipRow["n"]!!.jsonPrimitive.int)
+        assertEquals(3, skipRow["skips"]!!.jsonPrimitive.int)
+        for (row in rows) {
+            val n = row["n"]!!.jsonPrimitive.int
+            val skips = row["skips"]!!.jsonPrimitive.int
+            val sum = if (n == 0) 0.0 else row["mean"]!!.jsonPrimitive.double * n
+            val w = minOf(iw * skips, cap)
+            val stated = 0.5 + (k + sum) / (2 * k + n + w)
+            // Mean and weight are sent with three decimals.
+            assertEquals(stated, row["weight"]!!.jsonPrimitive.double, 0.0005 * (1 + n), "the formula disagrees with $row")
+        }
+        assertEquals(0.5 + k / (2 * k + 3 * iw), skipRow["weight"]!!.jsonPrimitive.double, 0.0005, "$skipRow")
+    }
+
     @Test
     fun `a sweep renders one playable point per value with its metrics`() {
         val strategies = get("/api/strategies").json["strategies"]!!.jsonArray.map { it.jsonObject }
