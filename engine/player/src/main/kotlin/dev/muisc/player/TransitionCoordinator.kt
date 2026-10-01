@@ -633,7 +633,7 @@ class TransitionCoordinator(
         if (e.installed != seg || e.djSkipped) return
         val features = e.features ?: return
         val strategyId = seg.rendered.plan.strategyId
-        val key = retainKey(e.a, e.b) + " " + strategyId
+        val key = retainKey(e.a, e.b) + "\u0000" + strategyId
         if (skipReported.containsKey(key)) return
         skipReported[key] = Unit
         val skip = TransitionSkip(e.a.id, e.b.id, strategyId, features, phase, secondsAfter)
