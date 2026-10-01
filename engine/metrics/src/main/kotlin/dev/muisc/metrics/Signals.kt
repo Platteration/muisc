@@ -178,18 +178,27 @@ internal object Signals {
 
         /** Times in seconds of every local maximum of [odf] within `t ± windowSec` that reaches `peakFraction * peak`. */
         fun allNear(t: Double, windowSec: Double, peakFraction: Double = ATTACK_PEAK_FRACTION): DoubleArray {
-            if (peak <= 0.0) return DoubleArray(0)
+            val found = peaksNear(t, windowSec, peakFraction)
+            return DoubleArray(found.size) { found[it].time }
+        }
+
+        /** One local maximum of [odf]: its time in seconds (sub-block interpolated) and its height. */
+        class Peak(val time: Double, val strength: Double)
+
+        /** [allNear] with each attack's strength (its [odf] value), in time order. */
+        fun peaksNear(t: Double, windowSec: Double, peakFraction: Double = ATTACK_PEAK_FRACTION): List<Peak> {
+            if (peak <= 0.0) return emptyList()
             val blockSec = blockFrames / sampleRate.toDouble()
             val lo = max(1, Math.floor((t - windowSec) / blockSec).toInt() - 1)
             val hi = min(odf.size - 2, Math.ceil((t + windowSec) / blockSec).toInt() + 1)
-            val out = ArrayList<Double>()
+            val out = ArrayList<Peak>()
             for (k in lo..hi) {
                 val v = odf[k]
                 if (v < peakFraction * peak || v < odf[k - 1] || v <= odf[k + 1]) continue
                 val time = (k + 0.5 + parabolicOffset(odf[k - 1], v, odf[k + 1])) * blockSec
-                if (abs(time - t) <= windowSec) out += time
+                if (abs(time - t) <= windowSec) out += Peak(time, v)
             }
-            return out.toDoubleArray()
+            return out
         }
 
         /**
@@ -216,14 +225,19 @@ internal object Signals {
         }
     }
 
-    /** [Attacks] of [buffer]'s mono mix on 1 ms blocks. */
-    fun attacks(buffer: AudioBuffer): Attacks {
+    /**
+     * [Attacks] of [buffer]'s mono mix on 1 ms blocks. With [highPassHz] > 0 the mix is first high-passed ([highPass],
+     * LR4) and the attacks are those of what lies above that frequency; [lookbackMs] is how far back the level an
+     * attack must exceed is taken from.
+     */
+    fun attacks(buffer: AudioBuffer, highPassHz: Double = 0.0, lookbackMs: Double = RISE_LOOKBACK_MS): Attacks {
         val sr = buffer.sampleRate
         val block = msFrames(1.0, sr)
-        val envelope = analyticEnvelope(mono(buffer))
+        val x = mono(buffer)
+        val envelope = analyticEnvelope(if (highPassHz > 0.0) highPass(x, sr, highPassHz) else x)
         val n = blockCount(envelope.size, block)
         val env = DoubleArray(n) { b -> var acc = 0.0; for (i in b * block until (b + 1) * block) acc += envelope[i]; acc / block }
-        val lookBack = max(1, Math.round(RISE_LOOKBACK_MS).toInt())
+        val lookBack = max(1, Math.round(lookbackMs).toInt())
         val odf = DoubleArray(n)
         for (k in 1 until n) {
             var before = 0.0

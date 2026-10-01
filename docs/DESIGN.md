@@ -882,8 +882,11 @@ the real analyser lands.
 - `beatAlignmentMs` / `beatAlignmentP90Ms`: per master beat, the render's strongest attack within ±50 ms (rise of
   the analytic envelope above its previous 20 ms, 1 ms blocks, parabolic sub-block peak) against the nearest attack
   the sources have there, mapped through their beat grids; beats where the render or neither source has an attack
-  are not counted. Median WARN > 5 ms; 90th percentile WARN > 5 ms, FAIL > 12 ms (see `ArtifactMetrics.beatAlignment`
-  and docs/QUALITY.md). The 3 ms budget for RESAMPLE plans and pinned onsets is not implemented.
+  are not counted. With sources, the same beats are also checked above 2 kHz (5 ms look-back): a render attack there
+  that no source attack accounts for within 2 ms counts as its distance to the nearest one, when at least 10 % of
+  the beats (and two) have one; this is what sees a deck played late on beats where both decks play. Median
+  WARN > 5 ms; 90th percentile WARN > 5 ms, FAIL > 12 ms (see `ArtifactMetrics.beatAlignment` and docs/QUALITY.md).
+  The 3 ms budget for RESAMPLE plans and pinned onsets is not implemented.
 - `rateTrackingErr`: `ratioTrace` vs planned ratio curve, max |Δ| ≤ 0.5 % (glides).
 - `bassCancellation`: low-band (< 150 Hz) energy of the mix vs sum of the deck low bands over the overlap: FAIL if
   < −6 dB (out-of-phase kicks).

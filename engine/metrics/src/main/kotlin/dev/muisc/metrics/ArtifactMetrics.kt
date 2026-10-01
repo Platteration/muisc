@@ -171,6 +171,31 @@ object ArtifactMetrics {
      * is; at 126 BPM the nearest off-beat hat is 238 ms away.
      */
     const val BEAT_ATTACK_WINDOW_MS = 50.0
+    /**
+     * Cut-off of the high band [beatAlignment] also checks (hats, snares): above it two decks'
+     * attacks a few milliseconds apart are each a rise of their own, where the full band hears one.
+     */
+    const val BEAT_HIGH_BAND_HZ = 2000.0
+    /**
+     * How far back (ms) the high band's attack function takes the level an attack must exceed. Short, so that a deck
+     * 15 ms behind the other is a rise over the first deck's already decayed hat, not over its peak.
+     */
+    const val BEAT_HIGH_BAND_LOOKBACK_MS = 5.0
+    /** High-band attacks of the render weaker than this fraction of the strongest one near the beat are not checked. */
+    const val BEAT_HIGH_BAND_LOCAL_FRACTION = 0.25
+    /** High-band source attacks down to this fraction of their source's strongest can account for a render attack. */
+    const val BEAT_HIGH_BAND_SOURCE_FRACTION = 0.05
+    /** A high-band render attack this close (ms) to a source attack mapped to output time is that source's attack. */
+    const val BEAT_HIGH_BAND_MATCH_MS = 2.0
+    /**
+     * The high band's errors count only when at least this share of the counted beats, and at least
+     * [BEAT_HIGH_BAND_MIN_BEATS] of them, have a high-band attack no source accounts for: a deck that is off is off on
+     * many beats, and a time-stretched hat can leave an odd attack of its own (on `recipe:smooth-blend t126Am -> t120C`,
+     * `ab --all`, one beat of 41 has one 7.2 ms from any source attack, and with four beats already at 9-10 ms in the
+     * full band that one beat alone moved the 90th percentile from 0.38 ms to 7.17 ms).
+     */
+    const val BEAT_HIGH_BAND_MIN_SHARE = 0.10
+    const val BEAT_HIGH_BAND_MIN_BEATS = 2
     /** Half-width of the window [evaluateProgramOutput] inspects around a program seam. */
     const val SEAM_WINDOW_MS = 50.0
 
@@ -471,6 +496,14 @@ object ArtifactMetrics {
      *    [MASTER_BEAT_LANE] ([MasterBeatMap]), else through the splice contract's constant offsets - is mapped back
      *    to output time. A beat at which neither source has an attack is not counted; otherwise the error is the
      *    distance from the render's attack to the nearest of them;
+     *  - with [input], the beat is also checked in the high band ([BEAT_HIGH_BAND_HZ], attack function with a
+     *    [BEAT_HIGH_BAND_LOOKBACK_MS] look-back): every high-band attack of the render within the window, at least
+     *    [BEAT_HIGH_BAND_LOCAL_FRACTION] of the strongest one there, must lie within [BEAT_HIGH_BAND_MATCH_MS] of a
+     *    high-band source attack mapped to output time the same way (at least [BEAT_HIGH_BAND_SOURCE_FRACTION] of its
+     *    source's strongest). One that does not counts as its distance to the nearest of those (the ones at
+     *    [Signals.ATTACK_PEAK_FRACTION] or more first). When at least [BEAT_HIGH_BAND_MIN_SHARE] of the counted beats
+     *    (and at least [BEAT_HIGH_BAND_MIN_BEATS]) have such an attack, each beat's error is the largest of these and
+     *    its full-band error; otherwise the high band changes nothing;
      *  - without sources the error is the distance from the render's attack to `t`.
      *
      * So the metric asks whether the render plays the decks' attacks where their beat grids and the master grid say
@@ -484,6 +517,15 @@ object ArtifactMetrics {
      * read 39-47 ms that way), and a few such beats are not a timing error, while a deck that is off is off on many
      * beats. When no beat counts, no metric is produced.
      *
+     * The high band is there because the full band hears one attack where both decks play on a beat: the on-time
+     * deck's attack comes first, and the late deck's is a rise over the first one's still-loud kick, so it is the
+     * weaker rise or no rise at all. Scoring only the strongest full-band attack, a deck played 20 ms late read
+     * 9.66 ms (WARN) on `recipe:long-glide` and 11.05 ms on `recipe:smooth-blend` (`BeatAlignmentTest`). Above 2 kHz
+     * hats and snares decay within a few milliseconds, so the late deck's are attacks of their own, which no source
+     * attack accounts for. A deck that has no high-band attacks during the overlap (an outro of pads and bass, or a
+     * deck whose drums the strategy takes out, as `recipe:drums-first` does with A's) is still judged only where its
+     * full-band attack is the strongest, and a late one can pass.
+     *
      * Only beat-domain renders have master beats at all - see [MASTER_BEAT_LANE].
      */
     fun beatAlignment(rendered: RenderedTransition, masterBeats: DoubleArray?, input: TransitionInput? = null): List<Metric> {
@@ -495,12 +537,17 @@ object ArtifactMetrics {
         val sources = input?.let { SourceClock.of(rendered, it) }
         val aAttacks = sources?.let { Signals.attacks(input.aAudio) }
         val bAttacks = sources?.let { Signals.attacks(input.bAudio) }
+        fun high(buffer: AudioBuffer) = Signals.attacks(buffer, BEAT_HIGH_BAND_HZ, BEAT_HIGH_BAND_LOOKBACK_MS)
+        val renderHigh = sources?.let { high(audio) }
+        val aHigh = sources?.let { high(input.aAudio) }
+        val bHigh = sources?.let { high(input.bAudio) }
         val errors = ArrayList<Double>(masterBeats.size)
+        val highErrors = ArrayList<Double>(masterBeats.size)
         for (t in masterBeats) {
             if (t < 0.0 || t > audio.durationSec) continue
             val attack = render.strongestNear(t, window)
             if (attack.isNaN()) continue
-            if (sources == null) { errors += abs(attack - t) * 1000.0; continue }
+            if (sources == null) { errors += abs(attack - t) * 1000.0; highErrors += 0.0; continue }
             val o = t * sr
             var nearest = Double.MAX_VALUE
             for ((clock, attacks) in listOf(sources.a to aAttacks!!, sources.b to bAttacks!!)) {
@@ -510,9 +557,16 @@ object ArtifactMetrics {
                     nearest = min(nearest, abs(attack - back / sr))
                 }
             }
-            if (nearest != Double.MAX_VALUE) errors += nearest * 1000.0
+            if (nearest == Double.MAX_VALUE) continue
+            errors += nearest * 1000.0
+            highErrors += highBandUnmatched(t, o, window, renderHigh!!, listOf(sources.a to aHigh!!, sources.b to bHigh!!)) * 1000.0
         }
         if (errors.isEmpty()) return emptyList()
+        // The high band counts only when it is off on many beats, not on an odd one.
+        val offBeats = highErrors.count { it > 0.0 }
+        if (offBeats >= max(BEAT_HIGH_BAND_MIN_BEATS, ceil(BEAT_HIGH_BAND_MIN_SHARE * errors.size).toInt())) {
+            for (i in errors.indices) errors[i] = max(errors[i], highErrors[i])
+        }
         val arr = DoubleArray(errors.size) { errors[it] }
         val median = Signals.median(arr)
         arr.sort()
@@ -521,6 +575,36 @@ object ArtifactMetrics {
             Metric.upper(BEAT_ALIGNMENT_MS, median, "ms", BEAT_ALIGNMENT_WARN_MS, Double.NaN),
             Metric.upper(BEAT_ALIGNMENT_P90_MS, p90, "ms", BEAT_ALIGNMENT_WARN_MS, BEAT_ALIGNMENT_FAIL_MS),
         )
+    }
+
+    /**
+     * The high-band check of [beatAlignment] at the master beat at output time [t] (frame [o]): the largest distance in
+     * seconds from a high-band attack of the render that no source attack accounts for to the nearest mapped source
+     * attack; 0 when every one is accounted for, or when the render or the sources have none there.
+     */
+    private fun highBandUnmatched(t: Double, o: Double, window: Double, render: Signals.Attacks, decks: List<Pair<SourceClock.Deck, Signals.Attacks>>): Double {
+        val heard = render.peaksNear(t, window)
+        if (heard.isEmpty()) return 0.0
+        val sr = render.sampleRate
+        val mapped = ArrayList<Signals.Attacks.Peak>() // time in output seconds, strength relative to its source's strongest
+        for ((clock, attacks) in decks) {
+            val at = clock.sourceFrame(o) ?: continue
+            for (p in attacks.peaksNear(at / sr, window, BEAT_HIGH_BAND_SOURCE_FRACTION)) {
+                val back = clock.outputFrame(p.time * sr) ?: continue
+                mapped += Signals.Attacks.Peak(back / sr, p.strength / attacks.peak)
+            }
+        }
+        if (mapped.isEmpty()) return 0.0
+        val match = BEAT_HIGH_BAND_MATCH_MS / 1000.0
+        val strongest = heard.maxOf { it.strength }
+        var worst = 0.0
+        for (r in heard) {
+            if (r.strength < BEAT_HIGH_BAND_LOCAL_FRACTION * strongest) continue
+            if (mapped.any { abs(it.time - r.time) <= match }) continue
+            val strong = mapped.filter { it.strength >= Signals.ATTACK_PEAK_FRACTION }.ifEmpty { mapped }
+            worst = max(worst, strong.minOf { abs(it.time - r.time) })
+        }
+        return worst
     }
 
     /**
