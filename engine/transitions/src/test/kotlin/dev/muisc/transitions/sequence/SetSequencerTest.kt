@@ -21,22 +21,24 @@ class SetSequencerTest {
     private fun meanCost(items: List<SequenceItem>, order: List<Int>): Double =
         (0 until order.size - 1).map { model.cost(items[order[it]].analysis, items[order[it + 1]].analysis, prefs) }.average()
 
-    /** What the planner itself says about each consecutive pair of [order]. */
-    private class PlannerStats(val pairs: Int, val onlyCrossfade: Int, val bestIsCrossfade: Int, val noBeatMatchedMove: Int) {
+    /**
+     * What the planner itself says about each consecutive pair of [order]: how many pairs have no beat-domain
+     * candidate at all, and how many get a beat-domain strategy as the planner's first choice.
+     */
+    private class PlannerStats(val pairs: Int, val bestIsBeatMatched: Int, val noBeatMatchedMove: Int) {
         val noBeatRate: Double get() = noBeatMatchedMove.toDouble() / pairs
-        override fun toString() = "only crossfade $onlyCrossfade, best = crossfade $bestIsCrossfade, no beat-matched move $noBeatMatchedMove of $pairs"
+        override fun toString() = "best is beat-matched $bestIsBeatMatched, no beat-matched move $noBeatMatchedMove of $pairs"
     }
 
     private fun plannerStats(items: List<SequenceItem>, order: List<Int>): PlannerStats {
         fun ref(i: Int) = TrackRef(items[i].id, AudioSourceId(items[i].id), items[i].analysis!!)
-        var only = 0; var best = 0; var noBeat = 0
+        var best = 0; var noBeat = 0
         for (k in 0 until order.size - 1) {
             val ranked = planner.plan(ref(order[k]), ref(order[k + 1]), prefs)
-            if (ranked.candidates.all { it.strategy.id == "crossfade" }) only++
-            if (ranked.best.strategy.id == "crossfade") best++
+            if (ranked.best.strategy.id in StructTables.BEAT_DOMAIN_IDS) best++
             if (ranked.candidates.none { it.strategy.id in StructTables.BEAT_DOMAIN_IDS }) noBeat++
         }
-        return PlannerStats(order.size - 1, only, best, noBeat)
+        return PlannerStats(order.size - 1, best, noBeat)
     }
 
     private fun assertPermutation(n: Int, order: List<Int>) {
@@ -46,6 +48,14 @@ class SetSequencerTest {
 
     // ------------------------------------------------------------------------------------------ beats random
 
+    /**
+     * Against random orders of the same 150 songs: the model's mean pair cost, and two things the planner says about
+     * the pairs (pairs with no beat-domain candidate at all; pairs whose best plan is beat-domain).
+     *
+     * Crossfade-only pairs are not checked: on this library the planner always offers moves besides crossfade
+     * (echoOut, filterSweep, phraseCut, ...) and never ranks crossfade first, in random orders as much as in sequenced
+     * ones, so "crossfade-only pairs must not increase" read 0 <= 0 for any order, the input order included.
+     */
     @Test
     fun `the sequenced order beats random orders on a synthetic library`() {
         val items = SyntheticLibrary.items(150, seed = 7)
@@ -63,13 +73,18 @@ class SetSequencerTest {
             println(
                 "$label: mean cost ${"%.4f".format(result.meanCost)} vs random ${"%.4f".format(randomMeans.average())} " +
                     "(best random ${"%.4f".format(randomMeans.min())}); planner: $stats; random (5 orders): " +
-                    "no beat-matched move ${"%.3f".format(randomNoBeat)}, only crossfade ${randomStats.sumOf { it.onlyCrossfade }}, " +
-                    "best = crossfade ${randomStats.sumOf { it.bestIsCrossfade }}",
+                    "no beat-matched move ${"%.3f".format(randomNoBeat)}, best is beat-matched ${randomStats.map { it.bestIsBeatMatched }}",
             )
             assertEquals(meanCost(items, result.order), result.meanCost, 1e-9, "$label: reported costs are the model's")
             assertTrue(result.meanCost < randomMeans.min(), "$label: mean pair cost ${result.meanCost} must beat every random order (best ${randomMeans.min()})")
             assertTrue(stats.noBeatRate < randomNoBeat, "$label: pairs without a beat-matched move ${stats.noBeatRate} must be rarer than in random orders ($randomNoBeat)")
-            assertTrue(stats.onlyCrossfade <= randomStats.minOf { it.onlyCrossfade }, "$label: crossfade-only pairs must not increase")
+            // Twice the most of any random order: the input order itself (another arbitrary order) has 13 such pairs
+            // against 4-10 in the five random orders, so "more than every random order" would pass a sequencer that
+            // returned its input unchanged.
+            assertTrue(
+                stats.bestIsBeatMatched >= 2 * randomStats.maxOf { it.bestIsBeatMatched },
+                "$label: pairs whose best plan is beat-matched (${stats.bestIsBeatMatched}) must be at least twice as many as in any random order (${randomStats.map { it.bestIsBeatMatched }})",
+            )
         }
     }
 
@@ -121,7 +136,9 @@ class SetSequencerTest {
 
     @Test
     fun `the same artist is not played back to back when the order allows it`() {
-        // Identical analyses: only the artist rule can tell orders apart. Three artists, ten songs each.
+        // Identical analyses: only the artist rule can tell orders apart. Three artists, ten songs each, grouped by
+        // artist in the input. Compared: the same sequencer with the rule and with sameArtistPenalty = 0 (not a random
+        // order); without the rule both modes keep some of the input's neighbours.
         val one = SyntheticLibrary.analysis(Random(1), "same")
         val items = List(30) { SequenceItem("s$it", one, artist = "artist ${it % 3}".let { a -> if (it % 2 == 0) a.uppercase() else a }) }
         val grouped = items.sortedBy { it.artist.lowercase() }
@@ -132,7 +149,7 @@ class SetSequencerTest {
             else seq.online(grouped.size, SequenceOptions(seed = 4, variety = 0.0, sameArtistPenalty = 0.0)) { grouped[it] }
             val counted = (0 until with.order.size - 1).count { SetSequencer.sameArtist(grouped[with.order[it]], grouped[with.order[it + 1]]) }
             assertEquals(counted, with.sameArtistPairs, "$mode: reported count")
-            println("$mode: same-artist pairs ${with.sameArtistPairs} with the rule, ${without.sameArtistPairs} without")
+            println("$mode: same-artist pairs ${with.sameArtistPairs} with the rule, ${without.sameArtistPairs} with sameArtistPenalty = 0")
             assertEquals(0, with.sameArtistPairs, "$mode: artist names match case-insensitively and are kept apart")
             assertTrue(without.sameArtistPairs > 0, "$mode: without the rule the grouped input keeps neighbours together")
         }
