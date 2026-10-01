@@ -51,7 +51,8 @@ import kotlin.math.abs
  *     (`custom.FeedbackLearner`, 0.5..1.5; exactly 1 without ratings or without a learner).
  *
  * **Pins.** When [customization] holds a [PairPin] for `(a.identity, b.identity)` and the pinned strategy
- * produced a candidate, that candidate is ranked first whatever its score (the others stay best-first by score).
+ * produced a candidate, that candidate is ranked first whatever its score (the others stay best-first by score)
+ * and carries [PlanCandidate.pinned].
  * When the pinned strategy is disabled, blocked, unknown or fails to plan, the normal ranking applies and
  * [PlanExplanation.pin] says why the pin was not used.
  *
@@ -196,7 +197,7 @@ class DefaultTransitionPlanner(
                 pinOutcome = PinOutcome(pin.strategyId, used = false, reason = "pinned ${pin.strategyId} not used ($why) — normal ranking applies", presetId = pinPreset?.id)
             }
         }
-        val ranked = RankedPlans(features, ordered.map { it.first })
+        val ranked = RankedPlans(features, ordered.map { (c, b) -> if (b.pinned) c.copy(pinned = true) else c })
         return ExplainedPlans(ranked, PlanExplanation(features, ordered.map { it.second }, skipped, pinOutcome, notes.distinct()))
     }
 

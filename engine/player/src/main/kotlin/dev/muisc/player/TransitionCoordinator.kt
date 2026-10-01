@@ -49,8 +49,10 @@ import kotlin.math.min
  *     installs / extends the [PlaybackProgram] on the [player] (bodies from [programBuilder]).
  *  2. Gate ([TransitionGating] plus segue protection and album-flow-in-playlist) → [CoordinatorState.Gated].
  *  3. Plan ([planner]) → [CoordinatorState.Planned]. The current edge tries first the candidates that leave both
- *     tracks their minimum body, the planner's order kept among them ([orderByRoom]); when none does, the planner's
- *     order stands.
+ *     tracks their minimum body, the planner's order kept among them and the user's pin kept first ([orderByRoom]).
+ *     A candidate that would leave A or B less than its minimum body is never rendered: when the edge reaches one
+ *     (none keeps both bodies, or the ones that do failed), the pair plays body to body without a transition, as
+ *     [DefaultProgramBuilder.build] would play it → [CoordinatorState.Gated] with [NO_ROOM].
  *  4. Render when `remainingA ≤ max(90 s, 4 × estimated render time)`; [gate] checks the render; accepted renders
  *     are installed via [EngineCommand.ReplaceTail] while the cursor is `< aExitFrame − 2 s` → [CoordinatorState.Ready].
  *     A rejected or failed render excludes its strategy and moves to the next candidate.
@@ -67,7 +69,9 @@ import kotlin.math.min
  * (weak evidence against that strategy for that pair; the host decides whether to record it). Never reported: a
  * skip later in B (it is about the song), album and single-track playback, live fallbacks (the planner's choice was
  * not what played), a transition the listener reached with a DJ skip (they were already leaving A), and a second
- * skip of the same transition: at most one report per (A, B, strategy) for the coordinator's lifetime.
+ * skip of the same transition: at most one report per (A, B, strategy) among the last [MAX_SKIP_REPORT_KEYS] (256)
+ * transitions this coordinator reported. The memory is bounded, so a transition reported longer ago than that (256
+ * other transitions skipped since) is reported again if it is skipped again.
  */
 class TransitionCoordinator(
     val planner: TransitionPlanner,
@@ -113,7 +117,10 @@ class TransitionCoordinator(
     private var driverJob: Job? = null
     private var previousStrategyId: String? = null
     private var renderEstimateMs = DEFAULT_RENDER_ESTIMATE_MS
-    /** (A, B, strategy) keys of the transitions already reported to [onTransitionSkipped], least recent first. */
+    /**
+     * (A, B, strategy) keys of the transitions already reported to [onTransitionSkipped], least recent first: an LRU
+     * of the last [MAX_SKIP_REPORT_KEYS], so the dedupe forgets the oldest key once that many others were reported.
+     */
     private val skipReported = object : LinkedHashMap<String, Unit>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>): Boolean = size > MAX_SKIP_REPORT_KEYS
     }
@@ -176,7 +183,7 @@ class TransitionCoordinator(
     /** "Next": a DJ skip, a live move or a plain skip (see the class comment); [plain] always skips plainly. */
     fun onUserSkip(plain: Boolean = false) {
         scope.launch {
-            noteSkip()
+            noteSkip(player.position)
             if (plain) {
                 player.submit(EngineCommand.Skip)
                 log("skip: plain skip")
@@ -188,9 +195,14 @@ class TransitionCoordinator(
 
     /**
      * Tells the coordinator the listener skipped when the host moves on by itself (a wrap to the start of the queue):
-     * only the implicit feedback of [onUserSkip], nothing is submitted. Call it before the host's own change.
+     * only the implicit feedback of [onUserSkip], nothing is submitted. Call it before the host's own change: the
+     * player's position is read here, on the caller's thread, because the host's change may reach the player before
+     * the coordinator's thread runs.
      */
-    fun noteUserSkip() { scope.launch { noteSkip() } }
+    fun noteUserSkip() {
+        val pos = player.position
+        scope.launch { noteSkip(pos) }
+    }
 
     fun onUserSeek(frame: Long) { scope.launch { userSeek(frame) } }
 
@@ -309,6 +321,10 @@ class TransitionCoordinator(
         orderByRoom(e)
         val cand = currentCandidate(e)
         if (cand == null) { installLive(e, "no renderable candidate", null); return }
+        if (e.renderJob == null) {
+            val fit = room.room(cand.plan, e.a, e.b, context, prefsProvider(), aEntryOf(e), null)
+            if (fit.starves) { playWithoutTransition(e, cand, fit); return }
+        }
         val aNow = aNowFrame(e)
         val deadline = cand.plan.aExitFrame - secondsToFrames(DEADLINE_SEC)
         if (aNow >= deadline) {
@@ -334,9 +350,12 @@ class TransitionCoordinator(
         e.ranked = ranked
         e.candidatePos = 0
         retained[key]?.let { r ->
-            // Only while the planner still ranks that strategy: a style may have excluded it since it was rendered.
+            // Only while the planner still ranks that strategy (a style may have excluded it since it was rendered),
+            // and only while it leaves A its body after the transition installed into A (when one is): it was
+            // rendered for another way into A.
             if (r.plan.strategyId !in prefs.disabledStrategies && allowedByPower(r.plan.strategyId) &&
-                ranked.candidates.any { it.strategy.id == r.plan.strategyId }
+                ranked.candidates.any { it.strategy.id == r.plan.strategyId } &&
+                !room.room(r.plan, a, b, context, prefs, aEntryOf(e), null).starves
             ) {
                 e.rendered = r
                 e.state = CoordinatorState.Ready(r.plan.strategyId)
@@ -376,19 +395,17 @@ class TransitionCoordinator(
      * ([DefaultProgramBuilder.roomOrder]) — A between the transition into it and this one, B between this one and
      * one of the plans of the transition out of it (planned here if it was not yet; when the track after B is not
      * analysed yet, as for the first transition of a freshly installed queue, B only has to keep its body on its
-     * own, and a render that is already due starts on that). The planner's own order is
-     * kept among candidates with room, so a track with room to spare plays exactly what the planner ranked first.
+     * own, and a render that is already due starts on that). B's next transition is judged by what it will play:
+     * its installed or ready render when it has one, else the candidates it would try ([nextPlans]). The planner's
+     * own order is kept among candidates with room, so a track with room to spare plays exactly what the planner
+     * ranked first, and the user's pin stays first unless it would starve a track.
      * Re-evaluated on every step until a render starts, as the transition into A gets installed; after that the
      * order is fixed and a failed or rejected render falls to the next candidate in it.
      */
     private fun orderByRoom(e: Edge) {
         val planned = e.planned ?: return
         if (e.renderJob != null) return
-        val aEntry = when (val incoming = edges[e.index - 1]?.installed) {
-            is Segment.Rendered -> incoming.rendered.plan.bEntryFrame
-            is Segment.Live -> incoming.plan.bExitFrame()
-            else -> null
-        }
+        val aEntry = aEntryOf(e)
         val prefs = prefsProvider()
         val next = nextPlans(e.index + 1)
         val ordered = room.roomOrder(planned.candidates, e.a, e.b, context, prefs, aEntry, next)
@@ -399,18 +416,37 @@ class TransitionCoordinator(
         if (cand != null && e.state is CoordinatorState.Planned) e.state = CoordinatorState.Planned(cand.strategy.id, cand.score)
         if (ordered.first() !== planned.best) {
             val why = room.room(planned.best.plan, e.a, e.b, context, prefs, aEntry, next)
-            log("edge ${e.index}: room — ${planned.best.strategy.id} ${why.name.lowercase()}; trying ${ordered.first().strategy.id} first")
+            val pin = if (planned.best.pinned) " (your pick)" else ""
+            log("edge ${e.index}: room — ${planned.best.strategy.id}$pin ${why.name.lowercase()}; trying ${ordered.first().strategy.id} first")
         }
     }
 
-    /** The plans the transition out of queue index [k] can choose from; null when there is none (last track, gated, not analysed yet). */
+    /**
+     * The plans the transition out of queue index [k] can still play: its installed or ready render when it has one
+     * (a retained render reused, or one installed on an earlier visit), else every candidate [currentCandidate]
+     * would accept (not excluded, allowed by the power mode, within the render cap); null when there is none (last
+     * track, gated, not analysed yet, or played without a transition).
+     */
     private fun nextPlans(k: Int): List<TransitionPlan>? {
         if (k + 1 >= queue.size || refs[k] == null || refs[k + 1] == null) return null
         val next = edges.getOrPut(k) { Edge(k, queue[k].id, queue[k + 1].id) }
         if (next.ranked == null && !next.isDone) gateAndPlan(next)
         if (next.isDone) return null
-        return next.planned?.candidates?.map { it.plan }
+        (next.installed as? Segment.Rendered)?.let { return listOf(it.rendered.plan) }
+        next.rendered?.let { return listOf(it.plan) }
+        return next.planned?.candidates?.filter { renderable(next, it) }?.map { it.plan }
     }
+
+    /** Where A's body starts for [e]: the hand-over of the transition installed into A; null when none is installed. */
+    private fun aEntryOf(e: Edge): Long? = when (val incoming = edges[e.index - 1]?.installed) {
+        is Segment.Rendered -> incoming.rendered.plan.bEntryFrame
+        is Segment.Live -> incoming.plan.bExitFrame()
+        else -> null
+    }
+
+    /** Whether [currentCandidate] would try [c] for [e]: not excluded, allowed by the power mode, within the render cap. */
+    private fun renderable(e: Edge, c: PlanCandidate): Boolean =
+        c.strategy.id !in e.excluded && allowedByPower(c.strategy.id) && c.plan.expectedOutputFrames <= limits.maxRenderedSec * sampleRate
 
     /** The candidate the edge is on (skipping excluded, power-restricted and over-long ones), advancing [Edge.candidatePos]. */
     private fun currentCandidate(e: Edge): PlanCandidate? {
@@ -419,8 +455,7 @@ class TransitionCoordinator(
         while (e.candidatePos < ranked.candidates.size) {
             val c = ranked.candidates[e.candidatePos]
             val id = c.strategy.id
-            val ok = id !in e.excluded && allowedByPower(id) && c.plan.expectedOutputFrames <= maxFrames
-            if (ok) return c
+            if (renderable(e, c)) return c
             if (c.plan.expectedOutputFrames > maxFrames && id !in e.excluded) { e.excluded += id; log("edge ${e.index}: $id skipped, ${c.plan.expectedOutputFrames} frames exceed the ${limits.maxRenderedSec} s cap") }
             e.candidatePos++
         }
@@ -505,7 +540,41 @@ class TransitionCoordinator(
         e.installed = Segment.Rendered(e.a, e.b, r)
         e.state = CoordinatorState.Ready(r.plan.strategyId)
         previousStrategyId = r.plan.strategyId
+        recheckNext(e)
         rebuildAndInstall()
+    }
+
+    /**
+     * [e]'s candidate [cand] is the next one to try and it would leave A or B less than its minimum body ([fit]):
+     * every candidate that keeps both bodies is behind it (failed, rejected, not allowed) or there was none. It is
+     * not rendered; the pair plays body to body, the way [DefaultProgramBuilder.build] drops such a transition.
+     */
+    private fun playWithoutTransition(e: Edge, cand: PlanCandidate, fit: DefaultProgramBuilder.Room) {
+        val who = if (fit == DefaultProgramBuilder.Room.STARVES_A) e.a.id else e.b.id
+        e.state = CoordinatorState.Gated(NO_ROOM)
+        log("edge ${e.index}: no room — ${cand.strategy.id} would leave $who less than its minimum body and no candidate left keeps both; played without a transition")
+    }
+
+    /**
+     * After [e]'s transition into B is installed: the transition out of B that is already installed or rendered (a
+     * retained render reused before [e] was chosen, or one installed on an earlier visit) must still leave B its
+     * minimum body. When it does not, it is dropped and B's transition is chosen again when B plays.
+     */
+    private fun recheckNext(e: Edge) {
+        val next = edges[e.index + 1] ?: return
+        val installed = next.installed
+        val (what, exit) = when {
+            installed is Segment.Rendered -> installed.rendered.plan.strategyId to installed.rendered.plan.aExitFrame
+            installed is Segment.Live -> "live ${installed.plan.kind}" to installed.plan.aFromFrame
+            next.rendered != null -> next.rendered!!.plan.strategyId to next.rendered!!.plan.aExitFrame
+            else -> return
+        }
+        if (room.hasRoom(next.a, context, prefsProvider(), aEntryOf(next), exit)) return
+        cancelEdge(next)
+        next.installed = null
+        next.rendered = null
+        next.state = currentCandidate(next)?.let { CoordinatorState.Planned(it.strategy.id, it.score) } ?: CoordinatorState.Analysing
+        log("edge ${next.index}: $what dropped — it would leave ${next.a.id} less than its minimum body after the transition into it")
     }
 
     /** Installs a live plan for [e]; [fromFrame] = where A should start the move (null: the planned exit, else soon). */
@@ -524,6 +593,7 @@ class TransitionCoordinator(
         e.forceLive = null
         e.state = CoordinatorState.Live(plan.kind, reason)
         log("edge ${e.index}: live ${plan.kind} — $reason")
+        recheckNext(e)
         rebuildAndInstall()
     }
 
@@ -604,13 +674,13 @@ class TransitionCoordinator(
     // ================================================================================================ user actions
 
     /**
-     * Reports the implicit feedback of a skip about to happen, from where the player is now (see the class comment).
-     * Runs before the skip is submitted, so the position is the one the listener skipped from.
+     * Reports the implicit feedback of a skip about to happen, from [pos], the player's position when the listener
+     * skipped (see the class comment). Runs before the skip is submitted and before the host's own queue change
+     * reaches [setQueue] (both come later on [scope]), so the mirror still describes the program [pos] is in.
      */
-    private fun noteSkip() {
+    private fun noteSkip(pos: ProgramPosition) {
         val listener = onTransitionSkipped ?: return
         if (context == PlaybackContext.ALBUM || context == PlaybackContext.SINGLE) return
-        val pos = player.position
         val here = mirror.getOrNull(pos.segmentIndex) ?: return
         val transition: Entry
         val phase: TransitionSkip.Phase
@@ -737,7 +807,8 @@ class TransitionCoordinator(
                         e.state = CoordinatorState.Planned(cand.strategy.id, cand.score)
                     }
                 }
-                PowerMode.NORMAL -> if ((e.state as? CoordinatorState.Gated)?.reason == "Power saver") { e.state = CoordinatorState.Analysing; e.ranked = null }
+                // A pair left without a transition for lack of room may have one now that more strategies are allowed.
+                PowerMode.NORMAL -> if ((e.state as? CoordinatorState.Gated)?.reason in REPLANNED_GATES) { e.state = CoordinatorState.Analysing; e.ranked = null }
             }
         }
         log("power mode $mode")
@@ -791,8 +862,13 @@ class TransitionCoordinator(
         const val REPLAN_MIN_SEC = 20.0
         /** A skip this long into B's body after a rendered transition still counts against the transition. */
         const val SKIP_SIGNAL_WINDOW_SEC = 20.0
+        /** How many reported (A, B, strategy) keys the skip dedupe remembers (an LRU; see the class comment). */
         private const val MAX_SKIP_REPORT_KEYS = 256
         const val SEGUE_SILENCE_SEC = 0.05
+        /** [CoordinatorState.Gated] reason of a pair played without a transition because no candidate left both tracks their minimum body. */
+        const val NO_ROOM = "No room for a transition"
+        /** Gates that a change back to [PowerMode.NORMAL] plans again. */
+        private val REPLANNED_GATES = setOf("Power saver", NO_ROOM)
         const val QUEUE_DEBOUNCE_MS = 500L
         const val DEFAULT_RENDER_ESTIMATE_MS = 5000.0
         /** `ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW`. */

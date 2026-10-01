@@ -35,7 +35,9 @@ package dev.muisc.transitions
  * Dropping is the last resort, not the plan: around a short track it would lose the transitions on both sides and
  * cut hard between songs. So the callers that choose the renders (`muisc mix`, the player's `TransitionCoordinator`)
  * try first the candidates that leave both tracks their minimum body — [roomOrder], with the same arithmetic as the
- * repair ([hasRoom]) — and [build] only drops when no candidate fitted.
+ * repair ([hasRoom]) — and a transition is dropped only when no candidate does. `mix` hands such a pair to [build]
+ * without a render; the coordinator, which never calls [build] (it installs [bodySegment]s), does not render a
+ * candidate that would starve a track and plays the pair body to body itself.
  *
  * Analysis frame positions are at `analysis.sampleRate`; they are rescaled to `prefs.sampleRate` when the two
  * differ (all program positions are engine-rate frames). Renders are trusted to be at the engine rate already.
@@ -133,14 +135,32 @@ class DefaultProgramBuilder : ProgramBuilder {
     /**
      * [candidates] (best first, as the planner ranked them) in the order to try them so that the chosen transition
      * is not one that [build] would have to drop: every candidate that [Room.FITS] first, then those that
-     * [Room.COSTS_NEXT], then the rest. The sort is stable, so within each group the planner's order is kept, and a
-     * planner's best that fits stays first — for tracks with room to spare nothing changes. Nothing is removed:
-     * when no candidate fits, the planner's order comes back unchanged and [build] drops as it always did.
+     * [Room.COSTS_NEXT], then the ones that starve a track ([Room.STARVES_B] and [Room.STARVES_A] alike). The sort
+     * is stable, so within each group the planner's order is kept, and a planner's best that fits stays first — for
+     * tracks with room to spare nothing changes.
+     *
+     * The user's own choice ([PlanCandidate.pinned]: a pin or the one-off "next transition" pick) stays first
+     * whenever it keeps both tracks their minimum body, even when it costs B's next transition; it gives way only
+     * when it would starve a track, which [build] would drop anyway.
+     *
+     * Nothing is removed, and when no candidate keeps both tracks their minimum body (every one starves A or B) the
+     * planner's order comes back unchanged.
      */
-    fun roomOrder(candidates: List<PlanCandidate>, a: TrackRef, b: TrackRef, context: PlaybackContext, prefs: TransitionPrefs, aEntryFrame: Long?, next: List<TransitionPlan>?): List<PlanCandidate> =
-        candidates.sortedBy { room(it.plan, a, b, context, prefs, aEntryFrame, next).ordinal }
+    fun roomOrder(candidates: List<PlanCandidate>, a: TrackRef, b: TrackRef, context: PlaybackContext, prefs: TransitionPrefs, aEntryFrame: Long?, next: List<TransitionPlan>?): List<PlanCandidate> {
+        val rank = candidates.map { c ->
+            val room = room(c.plan, a, b, context, prefs, aEntryFrame, next)
+            when {
+                room.starves -> 2
+                c.pinned -> -1
+                room == Room.FITS -> 0
+                else -> 1
+            }
+        }
+        if (rank.all { it == 2 }) return candidates
+        return candidates.indices.sortedBy { rank[it] }.map { candidates[it] }
+    }
 
-    /** What a candidate leaves the two tracks around it, in the order [roomOrder] tries them. */
+    /** What a candidate leaves the two tracks around it, in the order [roomOrder] tries them (the two STARVES alike). */
     enum class Room {
         /** A keeps its minimum body, and so does B: with one of its next transition's plans, or on its own. */
         FITS,
@@ -153,6 +173,10 @@ class DefaultProgramBuilder : ProgramBuilder {
         STARVES_B,
         /** A would not keep its minimum body between the transition into it and this one: [build] drops this one. */
         STARVES_A,
+        ;
+
+        /** [STARVES_A] or [STARVES_B]: a transition that [build] drops. */
+        val starves: Boolean get() = this == STARVES_A || this == STARVES_B
     }
 
     /** Body bounds for an entry and an exit (null = no transition on that side): the arithmetic of [bodySegment]. */

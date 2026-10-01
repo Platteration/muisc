@@ -33,7 +33,9 @@ import kotlinx.serialization.json.putJsonArray
  * does on the phone), renders each transition, builds one [dev.muisc.transitions.PlaybackProgram] with the gating
  * rule of the chosen [PlaybackContext] and runs it through the real [dev.muisc.player.ProgramPlayer]. Each pair plays
  * the best-ranked candidate that leaves both songs their minimum body ([DefaultProgramBuilder.roomOrder]), so a
- * short song keeps its transitions; a pair where none does is played body to body and reported as dropped.
+ * short song keeps its transitions; a pinned strategy (`muisc pin`, `--preset`) keeps first place unless it would
+ * leave a song less than its minimum body. A pair where no candidate leaves both songs their body is played body
+ * to body and reported as dropped, and the next pair is planned as if it had no previous transition.
  *
  * With `--order smart` the files are first reordered by the engine's smart shuffle ([SmartOrder.order], the same
  * sequencer as `muisc order`, seeded by `--seed`); it is refused for `--context album`, which always plays in order.
@@ -95,7 +97,8 @@ class MixCommand : MuiscCommand("mix") {
             val candidate = ordered.firstOrNull() ?: throw CliktError("no candidate for ${a.title} → ${b.title}")
             if (candidate !== ranked.best) {
                 val why = builder.room(ranked.best.plan, a, b, playbackContext, ctx.prefs, aEntry, next)
-                echo("${i + 1}. room: ${ranked.best.strategy.id} ${roomText(why, a, b)}; playing #${ranked.candidates.indexOf(candidate) + 1} ${candidate.strategy.id} instead")
+                val pin = if (ranked.best.pinned) " (pinned)" else ""
+                echo("${i + 1}. room: ${ranked.best.strategy.id}$pin ${roomText(why, a, b)}; playing #${ranked.candidates.indexOf(candidate) + 1} ${candidate.strategy.id} instead")
             }
             // No candidate fits: this one starves a track, so the builder would drop it — and when it starves B, it
             // would first drop B's next transition, which may well fit B entered from its own start. So it is
@@ -103,7 +106,7 @@ class MixCommand : MuiscCommand("mix") {
             val room = builder.room(candidate.plan, a, b, playbackContext, ctx.prefs, aEntry, next)
             val starves = room == DefaultProgramBuilder.Room.STARVES_A || room == DefaultProgramBuilder.Room.STARVES_B
             val result = RenderSupport.renderWithMetrics(ctx, a, b, candidate, features, seed)
-            previous = result.strategyId
+            if (!starves) previous = result.strategyId // a leg that is not played is not the previous transition
             aEntry = if (starves) null else result.plan.bEntryFrame
             transitions += Leg(a, b, result, candidate.score, null, played = !starves)
             echo("${i + 1}. ${a.title} → ${b.title}: ${result.strategyId} score ${Fmt.num(candidate.score, 3)}  " +

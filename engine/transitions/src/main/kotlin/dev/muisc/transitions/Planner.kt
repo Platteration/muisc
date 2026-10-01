@@ -16,6 +16,12 @@ data class PlanCandidate(
     val score: Double,
     val plan: TransitionPlan,
     val modifiers: List<TransitionModifier> = emptyList(),
+    /**
+     * The user chose this strategy for the pair (a stored pin, a session pin or the one-off "next transition" pick)
+     * and the planner ranked it first for that reason. [DefaultProgramBuilder.roomOrder] keeps such a candidate first
+     * unless it would leave a track less than its minimum body.
+     */
+    val pinned: Boolean = false,
 )
 
 /** Planner output: never empty (the crossfade floor guarantees a candidate for every pair). */

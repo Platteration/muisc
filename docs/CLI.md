@@ -81,8 +81,11 @@ order and renders no transitions at all, which is the behaviour the app uses whe
 Every song plays at least one bar of itself (half of itself if it is shorter than two bars) between the transitions
 around it. When the planner's favourite would not leave that (a short song, or a transition that exits before the
 previous one has handed the song over), `mix` plays the best-ranked candidate that does, and says so on a `room:`
-line. A transition that still has to be dropped, because no candidate fits, is reported with `dropped` and that
-pair plays body to body.
+line. A pinned strategy (`muisc pin`, `--preset`) keeps first place as long as it leaves both songs their bar, even
+when the next pair then cannot fit a transition; it gives way only when it would not (the `room:` line then says
+`(pinned)`). A transition that still has to be dropped, because no candidate leaves both songs their bar, is
+reported with `dropped`, that pair plays body to body, and the next pair is planned as if no transition came
+before it.
 
 ```
 muisc order playlist/ --seed 3                      # smart shuffle: the order, each pair's cost, total vs random

@@ -304,6 +304,86 @@ class CliSmokeTest {
         assertContains(text, "1. t120C → ${b.nameWithoutExtension}: crossfade dropped")
     }
 
+    /**
+     * The 15 s B again, with the a → B transition pinned to an 8 s crossfade: it enters B at 12 s, so B keeps 3.5 s
+     * of itself but none of B's plans into t63G can follow it (the latest leaves B at 11.5 s once the two bridges
+     * that hold B to its end are disabled). Room order used to put a candidate that fits ahead of the pin, so the
+     * user's choice silently never played ("room: crossfade ...; playing #4 phraseCut instead"). The pin plays now,
+     * and it is B → t63G that goes without a transition. [how] pins it with `pin set` (pins.json) or with `--preset`
+     * (a session pin for every pair).
+     */
+    private fun mixWithAPinThatCostsTheNextTransition(name: String, how: (profile: String, b: File) -> List<String>) {
+        val profile = File(root, "profile-$name").absolutePath
+        val dir = File(root, "short8-$name")
+        run("synth", "--out", dir.absolutePath, "--bpm", "124", "--key", "Am", "--bars", "8", "--intro", "2", "--outro", "2")
+        val b = dir.listFiles()!!.single { it.extension == "wav" }
+        val extra = how(profile, b)
+        val report = out("mix/pinned-$name.json")
+        val text = run(
+            "mix", songs.a.absolutePath, b.absolutePath, songs.d.absolutePath, "-o", out("mix/pinned-$name.wav").absolutePath,
+            "--report", report.absolutePath, "--set-pref", "disabledStrategies=spectralFreezeBridge,ambientBridge", "--profile-dir", profile, *extra.toTypedArray(),
+        )
+        val json = JSON.parseToJsonElement(report.readText()).jsonObject
+        val legs = json["transitions"]!!.jsonArray.map { it.jsonObject }
+        assertEquals("crossfade", legs[0]["strategy"]!!.jsonPrimitive.content, text)
+        assertTrue("room: crossfade" !in text, text)
+        val segments = json["segments"]!!.jsonArray.map { it.jsonObject }
+        assertEquals(listOf("body", "rendered", "body", "body"), segments.map { it["kind"]!!.jsonPrimitive.content }, text)
+        assertTrue(segments[1]["label"]!!.jsonPrimitive.content.startsWith("crossfade:"), "${segments[1]}")
+        // B keeps at least one bar of itself (124 BPM: 1.94 s) after the pinned crossfade.
+        assertTrue(segments[2]["frames"]!!.jsonPrimitive.content.toLong() >= 85_000, "B's body: ${segments[2]}")
+        assertContains(text, "2. ${b.nameWithoutExtension} → t63G: ${legs[1]["strategy"]!!.jsonPrimitive.content} dropped")
+    }
+
+    @Test
+    fun `mix plays a pinned transition that costs only the next transition`() {
+        mixWithAPinThatCostsTheNextTransition("stored") { profile, b ->
+            run("pin", "set", songs.a.absolutePath, b.absolutePath, "crossfade", "--set", "fadeSec=8", "--profile-dir", profile)
+            emptyList()
+        }
+    }
+
+    @Test
+    fun `mix plays a --preset session pin that costs only the next transition`() {
+        mixWithAPinThatCostsTheNextTransition("session") { profile, _ ->
+            run("preset", "save", "slow-fade", "--strategy", "crossfade", "--set", "fadeSec=8", "--profile-dir", profile)
+            listOf("--preset", "slow-fade")
+        }
+    }
+
+    /**
+     * A leg that is not played is not "the previous transition" either: in the set of `mix drops only the leg that
+     * cannot fit` the dropped crossfade into B used to be fed to the next pair as the previous strategy, so B → t63G
+     * (crossfade again, the only strategy allowed) was scored with the variety penalty for a repeat nobody heard.
+     */
+    @Test
+    fun `mix does not count a dropped leg as the previous transition`() {
+        val profile = File(root, "profile-previous").absolutePath
+        val dir = File(root, "short8-previous")
+        run("synth", "--out", dir.absolutePath, "--bpm", "124", "--key", "Am", "--bars", "8", "--intro", "2", "--outro", "2")
+        val b = dir.listFiles()!!.single { it.extension == "wav" }
+        val planned = run("plan", songs.a.absolutePath, b.absolutePath, "--json", "--profile-dir", profile)
+        val plan = JSON.parseToJsonElement(planned.substring(planned.indexOf('{'), planned.lastIndexOf('}') + 1)).jsonObject
+        val others = (plan["candidates"]!!.jsonArray + plan["skipped"]!!.jsonArray).map { it.jsonObject["strategyId"]!!.jsonPrimitive.content }
+            .filter { it != "crossfade" && '+' !in it }.toSet()
+        run("pin", "set", songs.a.absolutePath, b.absolutePath, "crossfade", "--set", "fadeSec=12", "--profile-dir", profile)
+        val disabled = "disabledStrategies=" + others.joinToString(",")
+
+        val report = out("mix/previous.json")
+        val text = run(
+            "mix", songs.a.absolutePath, b.absolutePath, songs.d.absolutePath, "-o", out("mix/previous.wav").absolutePath,
+            "--report", report.absolutePath, "--set-pref", disabled, "--profile-dir", profile,
+        )
+        assertContains(text, "1. t120C → ${b.nameWithoutExtension}: crossfade dropped")
+        val legs = JSON.parseToJsonElement(report.readText()).jsonObject["transitions"]!!.jsonArray.map { it.jsonObject }
+        // B → t63G planned with no previous transition (the first one played nothing) scores what `plan` says.
+        val alone = run("plan", b.absolutePath, songs.d.absolutePath, "--json", "--set-pref", disabled, "--profile-dir", profile)
+        val aloneJson = JSON.parseToJsonElement(alone.substring(alone.indexOf('{'), alone.lastIndexOf('}') + 1)).jsonObject
+        val expected = aloneJson["candidates"]!!.jsonArray.map { it.jsonObject }.single { it["strategyId"]!!.jsonPrimitive.content == "crossfade" }
+        assertEquals("crossfade", legs[1]["strategy"]!!.jsonPrimitive.content)
+        assertEquals(expected["score"]!!.jsonPrimitive.content.toDouble(), legs[1]["score"]!!.jsonPrimitive.content.toDouble(), 1e-12, text)
+    }
+
     @Test
     fun `mix in the album context plays the album gapless`() {
         val wav = out("mix/album.wav")

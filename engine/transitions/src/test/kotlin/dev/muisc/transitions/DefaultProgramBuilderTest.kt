@@ -216,6 +216,63 @@ class DefaultProgramBuilderTest {
     }
 
     /**
+     * When no candidate keeps both tracks their minimum body, the planner's order comes back unchanged even when
+     * the candidates starve different tracks: the sort used to put STARVES_B ahead of STARVES_A and so reordered
+     * [x (starves A), y (starves B)] into [y, x], although both are dropped. Starving candidates also keep the
+     * planner's order behind the ones that fit, and a candidate that only costs B's next transition still goes ahead
+     * of one that starves B (it plays; the other one is dropped).
+     */
+    @Test
+    fun roomOrderKeepsThePlannersOrderAmongCandidatesThatStarveATrack() {
+        val a = track("a"); val b = track("b", seconds = 30.0)
+        val next = listOf(cand("out", aExit = 12L * sr, bEntry = 2L * sr).plan)
+        val startsA = cand("startsA", aExit = 5L * sr, bEntry = 4L * sr)       // A entered at 4.5 s, left at 5 s
+        val startsB = cand("startsB", aExit = 50L * sr, bEntry = 29L * sr)     // B alone keeps 0.5 s
+        val costsNext = cand("costsNext", aExit = 50L * sr, bEntry = 20L * sr) // B alone keeps 9.5 s, but "out" leaves at 12 s
+        val fits = cand("fits", aExit = 50L * sr, bEntry = 4L * sr)
+        val aEntry = 9L * sr / 2
+        fun room(c: PlanCandidate) = builder.room(c.plan, a, b, PlaybackContext.PLAYLIST, prefs, aEntry, next)
+        assertEquals(DefaultProgramBuilder.Room.STARVES_A, room(startsA))
+        assertEquals(DefaultProgramBuilder.Room.STARVES_B, room(startsB))
+        assertEquals(DefaultProgramBuilder.Room.COSTS_NEXT, room(costsNext))
+        assertEquals(DefaultProgramBuilder.Room.FITS, room(fits))
+        fun order(vararg cs: PlanCandidate) = builder.roomOrder(cs.toList(), a, b, PlaybackContext.PLAYLIST, prefs, aEntry, next).map { it.plan.strategyId }
+
+        assertEquals(listOf("startsA", "startsB"), order(startsA, startsB))
+        assertEquals(listOf("startsB", "startsA"), order(startsB, startsA))
+        val unchanged = listOf(startsA, startsB)
+        assertTrue(builder.roomOrder(unchanged, a, b, PlaybackContext.PLAYLIST, prefs, aEntry, next) === unchanged, "nothing fits: the planner's list itself")
+        assertEquals(listOf("fits", "startsA", "startsB"), order(startsA, startsB, fits))
+        assertEquals(listOf("costsNext", "startsB"), order(startsB, costsNext))
+        assertEquals(listOf("fits", "costsNext", "startsA", "startsB"), order(startsA, costsNext, startsB, fits))
+    }
+
+    /**
+     * The user's own choice (a pin, or the one-off "next transition" pick; [PlanCandidate.pinned]) keeps first
+     * place when it leaves both tracks their body, even when it costs B's next transition: room order used to put
+     * every candidate that fits ahead of it, so the pick silently never played. It gives way only when it would
+     * starve a track, which [DefaultProgramBuilder.build] would drop anyway.
+     */
+    @Test
+    fun roomOrderKeepsThePinnedCandidateFirstUnlessItStarvesATrack() {
+        val a = track("a"); val b = track("b", seconds = 30.0)
+        val next = listOf(cand("out", aExit = 12L * sr, bEntry = 2L * sr).plan)
+        fun pinned(c: PlanCandidate) = c.copy(pinned = true)
+        val costsNext = cand("costsNext", aExit = 50L * sr, bEntry = 20L * sr)
+        val startsB = cand("startsB", aExit = 50L * sr, bEntry = 29L * sr)
+        val startsA = cand("startsA", aExit = 5L * sr, bEntry = 4L * sr)
+        val fits = cand("fits", aExit = 50L * sr, bEntry = 4L * sr)
+        val aEntry = 9L * sr / 2
+        fun order(vararg cs: PlanCandidate) = builder.roomOrder(cs.toList(), a, b, PlaybackContext.PLAYLIST, prefs, aEntry, next).map { it.plan.strategyId }
+
+        assertEquals(listOf("fits", "costsNext"), order(costsNext, fits), "not pinned: the one that fits goes first")
+        assertEquals(listOf("costsNext", "fits"), order(pinned(costsNext), fits), "pinned: the user's pick stays first")
+        assertEquals(listOf("fits", "startsB"), order(pinned(startsB), fits), "a pin that starves B gives way")
+        assertEquals(listOf("fits", "startsA"), order(pinned(startsA), fits), "a pin that starves A gives way")
+        assertEquals(listOf("startsA", "startsB"), order(pinned(startsA), startsB), "nothing fits: the planner's order, pin first")
+    }
+
+    /**
      * Full-length songs with the real planner: every candidate leaves both songs their body, so the room order is
      * the planner's ranking, object for object — including the pair `ReplanNextEdgeTest` (app) plays, whose pinned
      * last-ranked candidate must stay first.

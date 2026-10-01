@@ -291,7 +291,10 @@ What is wired, and how (the code is in `playback/DjCustomization.kt`, `playback/
   cleared as soon as the current or the next song changes. `ReplanNextEdgeTest` runs this against the real
   coordinator. Limits: it is refused while the transition is playing and with repeat-one; the planner still
   falls back (with the reason in the sheet's notes) when the chosen technique does not fit the analysis the
-  coordinator holds; in battery-saver mode the coordinator skips non-live-capable techniques as always.
+  coordinator holds; in battery-saver mode the coordinator skips non-live-capable techniques as always; and the
+  coordinator gives way to the next candidate when the chosen technique would leave the current or the next song
+  less than one bar of itself (`TransitionCoordinator`'s log says `room — <id> (your pick) ...`; the sheet does
+  not show it). A pick that only costs the next song its own transition out is kept.
 * **Ratings.** The Lab's thumbs keep their weight nudge and now *also* record a rating in the learned
   preferences; the Lab's blind A/B test renders two candidates, plays them as X and Y, and records up for the
   winner and down for the other. The Lab's "Pin for this pair" now also writes an engine pin (identity-keyed)
@@ -301,9 +304,11 @@ What is wired, and how (the code is in `playback/DjCustomization.kt`, `playback/
   `SkipFeedback` records it through `DjCustomization.recordSkip` → `FileFeedbackStore.recordImplicit` (same
   lock as ratings) when the toggle is on. Never counted: album and single-track playback, live fallbacks, a
   transition reached with a DJ skip, a skip later in B, and the same (A, B, technique) a second time while the
-  service lives. A skip weighs a quarter of a thumbs-down and skips alone never take a technique below ×0.83
-  (`FeedbackLearner.IMPLICIT_WEIGHT`, `IMPLICIT_CAP`). A `feedback.json` holding skips is written as version 2
-  (`implicitN`, `implicitSum` per bucket); engines from before this change cannot read it.
+  service lives, among the last 256 transitions it reported (`MAX_SKIP_REPORT_KEYS` in `TransitionCoordinator`,
+  an LRU: one reported before 256 others can count once more). A skip weighs a quarter of a thumbs-down and
+  skips alone never take a technique below ×0.83 (`FeedbackLearner.IMPLICIT_WEIGHT`, `IMPLICIT_CAP`). A
+  `feedback.json` holding skips is written as version 2 (`implicitN`, `implicitSum` per bucket); engines from
+  before this change cannot read it.
 * **Safety nets.** Nothing about customization can stop the service from starting: every file is read with
   the engine's skip-and-report loaders, and the problems are listed at the top of every DJ screen. Importing
   never overwrites one of the user's recipes without asking, keeps a recipe with errors only when the user says
