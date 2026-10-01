@@ -216,7 +216,10 @@ spectra and textbook chord progressions; they flatter beat tracking and key dete
 regressions and shows the known weak spots: over seeds 1, 2, 3 and 7 at 48 songs each, one song above 180 BPM
 read at half its tempo (182.5 → 91.3) and one song with no full-drum bars at all (8 bars of intro, 4 of outro) whose
 tempo is not found. Slow songs read at double time and wandering grids through long drumless intros, the weak
-spots before analysis version 3, no longer occur there. Use `muisc eval`'s analysis section for your library.
+spots before analysis version 3, no longer occur there. Every bench song's drums put a kick on every beat and hats on
+every eighth, so the bench says nothing about backbeats without hats, boom-chick or oom-pah; analysis version 3
+read many of those at half their tempo, and `RhythmAnalyzerTest`'s two-beat grooves guard them since version 4.
+Use `muisc eval`'s analysis section for your library.
 
 ## 5. The Lab's blind test
 

@@ -160,8 +160,10 @@ data class TrackAnalysis(
         /**
          * Bump whenever the analysis output changes in a way that invalidates caches. 3: the metrical-level check
          * (tempo halving), the seeded weighted grid fit and the peak-hold transient envelope moved tempos and grids.
+         * 4: the metrical-level check no longer halves backbeats, boom-chick or oom-pah (version 3 read many of them
+         * at half their tempo), nor any reading below 110 BPM.
          */
-        const val CURRENT_VERSION = 3
+        const val CURRENT_VERSION = 4
         val json: Json = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = false }
         fun fromJson(s: String): TrackAnalysis = json.decodeFromString(s)
     }

@@ -20,7 +20,8 @@ import kotlin.math.roundToInt
  * - [lowOdf] is the same flux restricted to the mel bands below ~150 Hz (kick drum / bass), normalised the same
  *   way. It drives the tempo-octave and downbeat decisions.
  * - [rawOdf] / [rawLowOdf] are the un-normalised sums (log-magnitude units) so callers can measure how much of
- *   the flux lives in the low band.
+ *   the flux lives in the low band. [rawMidOdf] is the un-normalised flux of the mel bands between the low band
+ *   and ~2 kHz (snare body, chords, voice); the rest of [rawOdf] is the high band (hats, cymbals, noise).
  * - [chroma] is a 12-bin pitch-class magnitude profile per frame (C = 0), un-normalised.
  * - [energy] is the mean log-compressed mel magnitude per frame (a loudness proxy in natural-log units).
  */
@@ -33,6 +34,8 @@ class OnsetFeatures(
     val rawLowOdf: FloatArray,
     val chroma: Array<FloatArray>,
     val energy: FloatArray,
+    /** Un-normalised flux of the mid band (150 Hz .. ~2 kHz, see [OnsetDetector.midBandMaxHz]); zeros when unknown. */
+    val rawMidOdf: FloatArray = FloatArray(rawOdf.size),
 ) {
     /** Seconds between consecutive ODF frames (`hop / sampleRate`, ≈ 11.6 ms for 256 @ 22.05 kHz). */
     val hopSeconds: Double get() = hop.toDouble() / sampleRate
@@ -158,6 +161,7 @@ class OnsetDetector(
     val lambda: Float = 10f,
     val maxFilterHalfWidth: Int = 1,
     val lowBandMaxHz: Double = 150.0,
+    val midBandMaxHz: Double = 2000.0,
     val normWindowSec: Double = 5.0,
     val normFloor: Float = 0.1f,
 ) {
@@ -179,6 +183,16 @@ class OnsetDetector(
         max(1, n)
     }
 
+    /**
+     * Number of leading mel bands that form the low and the mid band together (bands whose lower edge is below
+     * [midBandMaxHz]); the mid band is bands [lowBandCount] until this.
+     */
+    val midBandEnd: Int = run {
+        var n = lowBandCount
+        for (m in lowBandCount until nMels) if (mel.edgeFrequencies[m] < midBandMaxHz) n = m + 1
+        n
+    }
+
     /** Seconds per ODF frame. */
     val hopSeconds: Double get() = hop.toDouble() / sampleRate
 
@@ -195,6 +209,7 @@ class OnsetDetector(
         val frames = stft.frameCount(mono.size)
         val rawOdf = FloatArray(frames)
         val rawLow = FloatArray(frames)
+        val rawMid = FloatArray(frames)
         val energy = FloatArray(frames)
         val chroma = Array(frames) { FloatArray(12) }
 
@@ -204,6 +219,7 @@ class OnsetDetector(
         val lam = lambda
         val hw = maxFilterHalfWidth
         val lowCount = lowBandCount
+        val midEnd = midBandEnd
         val cls = chromaClass
         val sink = StftFrameSink { idx, re, im ->
             magnitude(re, im, mag, bins)
@@ -217,16 +233,18 @@ class OnsetDetector(
             if (idx > 0) {
                 var flux = 0f
                 var low = 0f
+                var mid = 0f
                 for (m in 0 until nMels) {
                     val lo = max(0, m - hw)
                     val hi = min(nMels - 1, m + hw)
                     var ref = prev[lo]
                     for (j in lo + 1..hi) if (prev[j] > ref) ref = prev[j]
                     val d = cur[m] - ref
-                    if (d > 0f) { flux += d; if (m < lowCount) low += d }
+                    if (d > 0f) { flux += d; if (m < lowCount) low += d else if (m < midEnd) mid += d }
                 }
                 rawOdf[idx] = flux
                 rawLow[idx] = low
+                rawMid[idx] = mid
             }
             val tmp = prev; prev = cur; cur = tmp
         }
@@ -236,7 +254,7 @@ class OnsetDetector(
         val normWin = max(1, (normWindowSec / hopSeconds).roundToInt())
         val odf = normaliseByRunningMax(rawOdf, normWin, normFloor)
         val lowOdf = normaliseByRunningMax(rawLow, normWin, normFloor)
-        return OnsetFeatures(sampleRate, hop, odf, lowOdf, rawOdf, rawLow, chroma, energy)
+        return OnsetFeatures(sampleRate, hop, odf, lowOdf, rawOdf, rawLow, chroma, energy, rawMid)
     }
 
     companion object {

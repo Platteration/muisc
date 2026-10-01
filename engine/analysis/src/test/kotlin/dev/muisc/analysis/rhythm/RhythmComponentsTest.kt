@@ -185,13 +185,21 @@ class RhythmComponentsTest {
 
     // ---- MetricalLevel ---------------------------------------------------------------------------------------
 
-    /** Features with the given raw broadband / low-band flux at 64 tracked beats 40 frames apart (even / odd beats). */
-    private fun parityFeatures(broadEven: Float, broadOdd: Float, lowEven: Float, lowOdd: Float): Pair<IntArray, OnsetFeatures> {
+    /**
+     * Features with the given raw broadband / low-band / mid-band flux at 64 tracked beats 40 frames apart (even / odd
+     * beats); the high band is what the broadband flux has beyond the low and mid bands.
+     */
+    private fun parityFeatures(
+        broadEven: Float, broadOdd: Float, lowEven: Float, lowOdd: Float, midEven: Float = 0f, midOdd: Float = 0f,
+    ): Pair<IntArray, OnsetFeatures> {
         val beats = IntArray(64) { 20 + it * 40 }
         val n = beats.last() + 40
-        val raw = FloatArray(n); val low = FloatArray(n)
-        for ((i, b) in beats.withIndex()) { raw[b] = if (i % 2 == 0) broadEven else broadOdd; low[b] = if (i % 2 == 0) lowEven else lowOdd }
-        return beats to OnsetFeatures(ar, 256, raw, low, raw, low, Array(n) { FloatArray(12) }, FloatArray(n))
+        val raw = FloatArray(n); val low = FloatArray(n); val mid = FloatArray(n)
+        for ((i, b) in beats.withIndex()) {
+            raw[b] = if (i % 2 == 0) broadEven else broadOdd; low[b] = if (i % 2 == 0) lowEven else lowOdd
+            mid[b] = if (i % 2 == 0) midEven else midOdd
+        }
+        return beats to OnsetFeatures(ar, 256, raw, low, raw, low, Array(n) { FloatArray(12) }, FloatArray(n), mid)
     }
 
     @Test
@@ -220,6 +228,46 @@ class RhythmComponentsTest {
         val slipped = IntArray(64) { if (it < 32) 20 + it * 40 else 20 + (it + 1) * 40 }
         assertEquals(0.0, m.parityBalance(slipped, slow.rawLowOdf), 1e-9)
         assertEquals(1.0, m.parityBalance(IntArray(4) { it * 40 }, slow.rawLowOdf), 1e-9) // fewer than 8 beats: no evidence
+    }
+
+    @Test
+    fun metricalLevel_doesNotHalveWhenTheOffBeatsCarryMoreThanHats() {
+        val m = MetricalLevel()
+        // Double time: the beats carry the kick, a snare body or a chord change (mid) and a hat; the off-beats a hat.
+        val (beats, slow) = parityFeatures(broadEven = 1f, broadOdd = 0.4f, lowEven = 0.4f, lowOdd = 0f, midEven = 0.3f, midOdd = 0.05f)
+        val c = m.check(beats, slow, bpm = 132.0)
+        assertEquals(0.05 / 0.3, c.midRatio, 1e-6); assertEquals(0.35 / 0.3, c.highRatio, 1e-6)
+        // high: 0.3 at the beats, 0.35 at the off-beats -> not hat-like
+        assertFalse(c.halve)
+        val (b1, slow1) = parityFeatures(broadEven = 1f, broadOdd = 0.4f, lowEven = 0.3f, lowOdd = 0f, midEven = 0.3f, midOdd = 0.05f)
+        val c1 = m.check(b1, slow1, bpm = 132.0)
+        assertEquals(0.35 / 0.4, c1.highRatio, 1e-6)
+        assertTrue(c1.halve, "low ${c1.lowBalance} broad ${c1.broadBalance} mid ${c1.midRatio} high ${c1.highRatio}")
+        // The same with the low band on the odd beats: the beat parity is the one with the low band, not the even one.
+        val swapped = IntArray(b1.size - 1) { b1[it + 1] }
+        assertTrue(m.check(swapped, slow1, bpm = 132.0).halve)
+        assertEquals(c1.highRatio, m.check(swapped, slow1, bpm = 132.0).highRatio, 1e-6)
+        // The halved tempo must be plausible: 110 -> 55 is halved, 108 -> 54 is not.
+        assertTrue(m.check(b1, slow1, bpm = 110.0).halve)
+        assertFalse(m.check(b1, slow1, bpm = 108.0).halve)
+
+        // A backbeat whose snare or chord puts as much mid-band flux on 2 and 4 as the kick and bass put on 1 and 3:
+        // broad balance 0.4 and low balance 0 alone would halve it.
+        val (b2, snare) = parityFeatures(broadEven = 1f, broadOdd = 0.4f, lowEven = 0.5f, lowOdd = 0f, midEven = 0.2f, midOdd = 0.2f)
+        val c2 = m.check(b2, snare, bpm = 120.0)
+        assertTrue(c2.lowBalance < m.maxLowBalance && c2.broadBalance < m.maxBroadBalance && c2.highRatio < m.maxHighRatio, "only the mid band vetoes")
+        assertEquals(1.0, c2.midRatio, 1e-6)
+        assertFalse(c2.halve)
+        // A clap backbeat (high band only) whose clap is weaker than the kick in broadband flux: the off-beats carry
+        // more high-band flux than the beats, which have none.
+        val (b3, clap) = parityFeatures(broadEven = 1f, broadOdd = 0.5f, lowEven = 0.75f, lowOdd = 0f, midEven = 0.25f, midOdd = 0.05f)
+        val c3 = m.check(b3, clap, bpm = 120.0)
+        assertTrue(c3.lowBalance < m.maxLowBalance && c3.broadBalance < m.maxBroadBalance && c3.midRatio < m.maxMidRatio, "only the high band vetoes")
+        assertTrue(c3.highRatio.isInfinite(), "no high-band flux at the beats: ${c3.highRatio}")
+        assertFalse(c3.halve)
+        // No mid-band information (features made without it): the mid band never vetoes.
+        val (b4, noMid) = parityFeatures(broadEven = 1f, broadOdd = 0.4f, lowEven = 0.5f, lowOdd = 0f)
+        assertEquals(0.0, m.check(b4, noMid, bpm = 132.0).midRatio)
     }
 
     // ---- BeatTracker -----------------------------------------------------------------------------------------

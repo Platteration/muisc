@@ -6,6 +6,8 @@ import dev.muisc.audio.AudioBuffer
 import dev.muisc.audio.synth.Mode
 import dev.muisc.audio.synth.Synth
 import dev.muisc.audio.synth.SyntheticSong
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.MethodSource
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -17,6 +19,46 @@ import kotlin.test.assertTrue
  */
 class RhythmAnalyzerTest {
     private val sr = 44100
+
+    companion object {
+        /**
+         * Two-beat grooves at 85–130 BPM ([Grooves]). The ones marked "halved" were read at half their tempo by the
+         * metrical-level check of analysis version 3; the others are kept as guards.
+         */
+        @JvmStatic
+        fun twoBeatGrooves(): List<Grooves.Groove> {
+            val kb = Grooves.Low.KICK_BASS
+            return listOf(
+                // clap backbeat (kick 0.8), no hats: halved at every clap level
+                Grooves.Groove("clap 0.3, no hats", 92.0, kb, Grooves.Back.CLAP, 0.3f, 0f),
+                Grooves.Groove("clap 0.6, no hats", 120.0, kb, Grooves.Back.CLAP, 0.6f, 0f),
+                Grooves.Groove("clap 1.2, no hats", 100.0, kb, Grooves.Back.CLAP, 1.2f, 0f),
+                Grooves.Groove("clap 0.3, no hats", 130.0, kb, Grooves.Back.CLAP, 0.3f, 0f),
+                // clap backbeat with quiet and with normal eighth-note hats: halved
+                Grooves.Groove("clap 0.6, quiet hats", 100.0, kb, Grooves.Back.CLAP, 0.6f, 0.05f),
+                Grooves.Groove("clap 1.2, quiet hats", 120.0, kb, Grooves.Back.CLAP, 1.2f, 0.05f),
+                Grooves.Groove("clap 1.2, hats", 100.0, kb, Grooves.Back.CLAP, 1.2f, 0.18f),
+                Grooves.Groove("clap 0.08, kick 1.0, hats", 110.0, kb, Grooves.Back.CLAP, 0.08f, 0.18f, kickAmp = 1.0f),
+                Grooves.Groove("clap 0.08, kick 1.0, hats", 126.0, kb, Grooves.Back.CLAP, 0.08f, 0.18f, kickAmp = 1.0f),
+                // snare backbeat with a 280 Hz body (little of it in the low band), no hats: halved
+                Grooves.Groove("snare 280 Hz 0.3, no hats", 92.0, kb, Grooves.Back.SNARE, 0.3f, 0f, snareHz = 280.0),
+                Grooves.Groove("snare 280 Hz 0.3, no hats", 130.0, kb, Grooves.Back.SNARE, 0.3f, 0f, snareHz = 280.0),
+                // snare backbeats the first check already kept (guards)
+                Grooves.Groove("snare 0.5, no hats", 88.0, kb, Grooves.Back.SNARE, 0.5f, 0f),
+                Grooves.Groove("snare 230 Hz 0.5, hats", 120.0, kb, Grooves.Back.SNARE, 0.5f, 0.18f, snareHz = 230.0),
+                // boom-chick (kick + bass / chord + brush): halved with a quiet chord, kept with a louder one
+                Grooves.Groove("boom-chick chord 0.02", 88.0, kb, Grooves.Back.CHORD_BRUSH, 0.02f, 0f),
+                Grooves.Groove("boom-chick chord 0.03", 110.0, kb, Grooves.Back.CHORD_BRUSH, 0.03f, 0f),
+                Grooves.Groove("boom-chick chord 0.02", 126.0, kb, Grooves.Back.CHORD_BRUSH, 0.02f, 0f),
+                Grooves.Groove("boom-chick chord 0.12", 120.0, kb, Grooves.Back.CHORD_BRUSH, 0.12f, 0f),
+                // oom-pah (bass / chord): halved with the chord at 0.06, kept at 0.12
+                Grooves.Groove("oom-pah chord 0.06", 85.0, Grooves.Low.BASS, Grooves.Back.CHORD, 0.06f, 0f),
+                Grooves.Groove("oom-pah chord 0.06", 100.0, Grooves.Low.BASS, Grooves.Back.CHORD, 0.06f, 0f),
+                Grooves.Groove("oom-pah chord 0.06", 120.0, Grooves.Low.BASS, Grooves.Back.CHORD, 0.06f, 0f),
+                Grooves.Groove("oom-pah chord 0.12", 110.0, Grooves.Low.BASS, Grooves.Back.CHORD, 0.12f, 0f),
+            )
+        }
+    }
 
     private fun beatSeconds(grid: BeatGrid): DoubleArray = DoubleArray(grid.beatCount) { grid.beatFrames[it].toDouble() / sr }
 
@@ -231,6 +273,18 @@ class RhythmAnalyzerTest {
         // Kick on 1 and 3, snare on 2 and 4, hi-hats on the eighths, bass on 1 and 3: the low band alternates beat to
         // beat just as a slow song's tracked eighths do, but the snare is as strong a broadband event as the kick, so
         // the metrical-level check must not halve it (120 BPM, not 60).
+        backbeat(hats = true)
+    }
+
+    @Test
+    fun backbeatWithoutHats_keepsItsTempo() {
+        // The same backbeat with no hi-hats: the clap is then the louder broadband event and the kick's beats carry
+        // nothing above the low band. The symmetric broadband balance of the first metrical-level check read that as
+        // alternation and halved it (120 → 60).
+        backbeat(hats = false)
+    }
+
+    private fun backbeat(hats: Boolean) {
         val bpm = 120.0
         val beat = 60.0 / bpm
         val x = FloatArray(Math.round(40.0 * sr).toInt())
@@ -255,7 +309,7 @@ class RhythmAnalyzerTest {
                     if (start + i < x.size) x[start + i] += 0.6f * kotlin.math.exp(-i * 22.0 / sr).toFloat() * out
                 }
             }
-            for (h in 0 until 2) {
+            for (h in 0 until if (hats) 2 else 0) {
                 val hs = Math.round((k * beat + h * beat / 2) * sr).toInt()
                 var hp = 0f
                 for (i in 0 until (0.1 * sr).toInt()) {
@@ -269,6 +323,21 @@ class RhythmAnalyzerTest {
         val r = RhythmAnalyzer().analyze(AudioBuffer.mono(sr, x))
         assertEquals(bpm, r.tempo.bpm, bpm * 0.01, "backbeat tempo (alternates ${r.tempo.alternates})")
         assertEquals(bpm, r.grid.bpm, bpm * 0.01, "backbeat grid tempo")
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("twoBeatGrooves")
+    fun backbeatBoomChickAndOomPah_keepTheirTempo(g: Grooves.Groove) {
+        // Something low on 1 and 3 (kick and bass, or bass alone) and something else on 2 and 4 (snare, clap, chord
+        // and brush, chord alone): the low band alternates beat to beat, but the beat between two low notes is a real
+        // beat, not a hi-hat off-beat, so the tempo must not be halved. The first metrical-level check halved most of
+        // these (92 → 46, 120 → 60, ...), see the comments in [twoBeatGrooves].
+        val r = RhythmAnalyzer().analyze(Grooves.render(g, sr))
+        assertEquals(g.bpm, r.tempo.bpm, g.bpm * 0.01, "$g: tempo (alternates ${r.tempo.alternates})")
+        assertEquals(g.bpm, r.grid.bpm, g.bpm * 0.01, "$g: grid tempo")
+        val truth = (0 until (g.seconds / (60.0 / g.bpm)).toInt()).map { it * 60.0 / g.bpm }.filter { it in 2.0..(g.seconds - 2.0) }
+        val hits = hitRate(beatSeconds(r.grid), truth, 0.025)
+        assertTrue(hits >= 0.9, "$g: beat hit rate $hits")
     }
 
     @Test
