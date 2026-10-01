@@ -72,15 +72,20 @@ class SmartShuffleTest {
     }
 
     @Test
-    fun sameSeedSameOrderAndUnanalysedSongsAreNeverLookedUp() {
+    fun sameSeedSameOrderAndAStaleFlagNeverHidesAnAnalysis() {
+        // The queue keeps the Song rows of the moment it was built, so `hasAnalysis` can be stale (the worker analysed
+        // the song since): the flag must not decide whether the analysis is read.
         val mixed = songs.mapIndexed { i, s -> if (i % 4 == 0) s.copy(hasAnalysis = false) else s }
-        val looked = HashSet<Long>()
+        val looked = HashMap<Long, Int>()
         val shuffle = SmartShuffle()
-        val a = shuffle.arrange(mixed.first(), mixed.drop(1), 3, TransitionPrefs()) { s -> looked += s.id; analyses[s.id] }
+        val a = shuffle.arrange(mixed.first(), mixed.drop(1), 3, TransitionPrefs()) { s -> looked[s.id] = (looked[s.id] ?: 0) + 1; analyses[s.id] }
         val b = shuffle.arrange(mixed.first(), mixed.drop(1), 3, TransitionPrefs()) { s -> analyses[s.id] }
         assertEquals(a.map { it.id }, b.map { it.id })
-        assertTrue(looked.none { id -> mixed.first { it.id == id }.hasAnalysis.not() }, "no lookup for a song without an analysis")
-        assertEquals(mixed.drop(1).map { it.id }.sorted(), a.map { it.id }.sorted(), "unanalysed songs are placed too")
+        assertEquals(mixed.map { it.id }.toSet(), looked.keys, "every song of a short queue is looked up, whatever its flag says")
+        assertTrue(looked.values.all { it == 1 }, "each analysis read at most once")
+        // A song the cache has no analysis for is placed without one.
+        val none = shuffle.arrange(mixed.first(), mixed.drop(1), 3, TransitionPrefs()) { s -> if (s.hasAnalysis) analyses[s.id] else null }
+        assertEquals(mixed.drop(1).map { it.id }.sorted(), none.map { it.id }.sorted(), "unanalysed songs are placed too")
         // A lookup that throws is treated as "no analysis": the song is still placed.
         val c = shuffle.arrange(mixed.first(), mixed.drop(1), 3, TransitionPrefs()) { s -> if (s.id == 2L) error("corrupt row") else analyses[s.id] }
         assertEquals(mixed.drop(1).map { it.id }.sorted(), c.map { it.id }.sorted())
@@ -99,23 +104,27 @@ class SmartShuffleTest {
     @Test
     fun replaceAfterSwapsOnlyAnUnchangedTail() {
         val queue = QueueManager()
-        val list = songs.take(6)
+        val list = songs.take(8)
         queue.setQueue(list, 0, PlaybackContext.SHUFFLE)
-        val tail = list.drop(1)
+        // Arranged after the song that follows the current one: the engine may already be mixing into that one.
+        val tail = list.drop(2)
         val reversed = tail.reversed()
-        assertFalse(queue.replaceAfter(0, anchorId = 99L, expected = tail, songs = reversed), "wrong anchor")
-        assertFalse(queue.replaceAfter(0, list[0].id, expected = tail.drop(1), songs = reversed.drop(1)), "tail changed")
-        assertFalse(queue.replaceAfter(0, list[0].id, expected = tail.drop(1), songs = tail.drop(1).reversed()), "tail changed (a song was added since)")
-        assertFalse(queue.replaceAfter(0, list[0].id, expected = tail, songs = reversed.drop(1) + song(77)), "not a permutation")
+        assertFalse(queue.replaceAfter(1, anchorId = 99L, expected = tail, songs = reversed), "wrong anchor")
+        assertFalse(queue.replaceAfter(1, list[1].id, expected = tail.drop(1), songs = reversed.drop(1)), "tail changed")
+        assertFalse(queue.replaceAfter(1, list[1].id, expected = tail.drop(1), songs = tail.drop(1).reversed()), "tail changed (a song was added since)")
+        assertFalse(queue.replaceAfter(1, list[1].id, expected = tail, songs = reversed.drop(1) + song(77)), "not a permutation")
+        assertFalse(queue.replaceAfter(0, list[0].id, expected = list.drop(1), songs = list.drop(1).reversed()), "the next song would move")
         assertEquals(list.map { it.id }, queue.snapshot().songs.map { it.id }, "refusals leave the queue alone")
-        assertTrue(queue.replaceAfter(0, list[0].id, tail, reversed))
-        assertEquals((listOf(list[0]) + reversed).map { it.id }, queue.snapshot().songs.map { it.id })
+        assertTrue(queue.replaceAfter(1, list[1].id, tail, reversed))
+        assertEquals((list.take(2) + reversed).map { it.id }, queue.snapshot().songs.map { it.id })
         assertEquals(queue.snapshot().songs.map { it.id }, queue.naturalOrder().map { it.id }, "shuffle off: the natural order follows")
-        // Never before the current song.
+        // Never at or before the current song.
         queue.skipTo(3)
         val now = queue.snapshot().songs
         assertFalse(queue.replaceAfter(1, now[1].id, now.drop(2), now.drop(2).reversed()))
-        assertTrue(queue.replaceAfter(3, now[3].id, now.drop(4), now.drop(4).reversed()))
+        assertFalse(queue.replaceAfter(3, now[3].id, now.drop(4), now.drop(4).reversed()), "the next song would move")
+        assertTrue(queue.replaceAfter(4, now[4].id, now.drop(5), now.drop(5).reversed()))
+        assertEquals((now.take(5) + now.drop(5).reversed()).map { it.id }, queue.snapshot().songs.map { it.id })
     }
 
     @Test
@@ -125,8 +134,8 @@ class SmartShuffleTest {
         queue.setQueue(list, 0, PlaybackContext.PLAYLIST)
         queue.setShuffle(true)
         val snap = queue.snapshot()
-        val tail = snap.songs.drop(snap.index + 1)
-        assertTrue(queue.replaceAfter(snap.index, snap.current!!.id, tail, tail.reversed()))
+        val tail = snap.songs.drop(snap.index + 2)
+        assertTrue(queue.replaceAfter(snap.index + 1, snap.songs[snap.index + 1].id, tail, tail.reversed()))
         assertEquals(list.map { it.id }, queue.naturalOrder().map { it.id }, "the playlist's own order is kept for shuffle off")
         queue.setShuffle(false)
         assertEquals(list.map { it.id }, queue.snapshot().songs.map { it.id })

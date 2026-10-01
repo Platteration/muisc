@@ -690,10 +690,16 @@ percussiveness); arcs are `flat`, `rising`, `wave` (period 10) and `peak` (warm-
 same seed gives the same order on every machine. For small sets (the CLI: ≤ 24 tracks) the pair cost can blend in
 the planner's best score.
 
-On the phone the first song of a shuffle starts at once in a random order; the controller then arranges the next 64
-slots off the main thread from analyses read by source (no file I/O) and swaps them in only if the queue is
-unchanged, and arranges the next 64 when playback gets within 16 songs of the end of the arranged part. Any queue
-edit by the user ends the arrangement.
+On the phone the first song of a shuffle starts at once in a random order, and the song after it keeps its random
+place too: the engine may already be mixing into it (a skip, or the closing transition) before the queue index moves
+at the handover, so no pass ever moves the song after the current one. The controller (`SmartShuffleSession`)
+arranges the next 64 slots after that song off the main thread from the analyses cached for each song's source (no
+file I/O, read again on every pass, so songs analysed since the shuffle started count) and swaps them in only if the
+queue is unchanged; a pass refused because the listener moved on meanwhile is re-anchored at the current position
+and tried once more. It arranges the next 64 when playback gets within 16 songs of the end of the arranged part, from
+the song after the current one when the listener jumped past that part. Any queue edit by the user ends the
+arrangement, also while a pass is being applied; a shuffle command that changes nothing (a remote re-sending its
+state) is not an edit.
 
 ---
 

@@ -31,7 +31,6 @@ import dev.muisc.transitions.TransitionRenderer
 import dev.muisc.transitions.live.LivePlanFactory
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.math.max
@@ -175,12 +174,18 @@ class EngineControllerImpl(
     // ---- smart shuffle ----
     /** The Smart shuffle setting ([UiPrefs.smartShuffle]), followed from the settings store. */
     @Volatile private var smartShuffleEnabled: Boolean = UiPrefs().smartShuffle
-    private val smartShuffle = SmartShuffle()
-    /** Bumped by every queue change smart shuffle did not make; a pass started under an older value is dropped. */
-    private val smartGeneration = AtomicInteger()
-    /** Queue position of the last song smart shuffle arranged; -1 when the queue is not (or no longer) smart-shuffled. */
-    @Volatile private var smartThrough: Int = -1
-    @Volatile private var smartJob: Job? = null
+    /** When to arrange which part of the queue, and when to stop ([SmartShuffle] does the ordering). */
+    private val smart = SmartShuffleSession(
+        smartShuffle = SmartShuffle(),
+        snapshot = { queue.snapshot() },
+        replaceAfter = { position, anchorId, expected, songs -> queue.replaceAfter(position, anchorId, expected, songs) },
+        analysisOf = { song -> analyses.lastKnown(song) },
+        prefs = { prefs },
+        enabled = { smartShuffleEnabled },
+        onArranged = { install(null) },
+        scope = scope,
+        passContext = Dispatchers.IO,
+    )
 
     /** Started by [EngineGraph]; stopped from [release] so the receiver does not outlive the service. */
     @Volatile private var powerMonitor: PowerModeMonitor? = null
@@ -332,7 +337,7 @@ class EngineControllerImpl(
         if (songs.isEmpty()) return
         // The first song starts now, whatever the setting: sequencing never delays playback.
         setQueue(songs.shuffled(), 0, PlaybackContext.SHUFFLE)
-        if (smartShuffleEnabled) arrangeAfter(0)
+        if (smartShuffleEnabled) smart.start()
     }
 
     override fun playNext(songs: List<Song>) {
@@ -387,48 +392,20 @@ class EngineControllerImpl(
     }
 
     override fun setShuffle(enabled: Boolean) {
+        // A command that changes nothing (a head unit or a remote re-sending its state) is not an edit: it must not end
+        // the smart arrangement in progress.
+        if (enabled == queue.snapshot().shuffle) return
         endSmartShuffle()
-        val before = queue.snapshot().shuffle
         val snapshot = queue.setShuffle(enabled)
         install(null)
-        // Turning shuffle on smart-orders what comes after the current song too — never for an album, which keeps
-        // its gapless album flow whatever order it is in.
-        if (enabled && !before && smartShuffleEnabled && snapshot.context != PlaybackContext.ALBUM) arrangeAfter(snapshot.index)
-    }
-
-    /**
-     * Smart shuffle: arranges the songs after queue position [position] off the main thread ([SmartShuffle], reading
-     * analyses from the cache by source, no file I/O) and swaps them in with [QueueManager.replaceAfter], which
-     * refuses if the queue changed meanwhile. A failure leaves the random order in place: it never stops playback.
-     */
-    private fun arrangeAfter(position: Int) {
-        val snapshot = queue.snapshot()
-        val anchor = snapshot.songs.getOrNull(position) ?: return
-        val tail = snapshot.songs.subList(position + 1, snapshot.songs.size).toList()
-        if (tail.size < 2) return
-        val generation = smartGeneration.get()
-        val seed = System.nanoTime()
-        val prefsNow = prefs
-        smartJob = scope.launch(Dispatchers.IO) {
-            val arranged = try {
-                smartShuffle.arrange(anchor, tail, seed, prefsNow) { song -> analyses.lastKnown(song) }
-            } catch (e: Exception) {
-                return@launch
-            }
-            if (smartGeneration.get() != generation) return@launch
-            if (queue.replaceAfter(position, anchor.id, tail, arranged)) {
-                smartThrough = position + minOf(smartShuffle.horizon, tail.size)
-                install(null)
-            }
-        }
+        // Turning shuffle on smart-orders what comes after the next song too — never for an album, which keeps its
+        // gapless album flow whatever order it is in.
+        if (enabled && smartShuffleEnabled && snapshot.context != PlaybackContext.ALBUM) smart.start()
     }
 
     /** The user changed the queue: stop arranging it (the order they now have stays as it is). */
     private fun endSmartShuffle() {
-        smartGeneration.incrementAndGet()
-        smartThrough = -1
-        smartJob?.cancel()
-        smartJob = null
+        smart.end()
     }
 
     override fun setRepeat(mode: RepeatMode) {
@@ -774,14 +751,7 @@ class EngineControllerImpl(
         if (index >= 0 && index != queue.index) {
             publishQueue(queue.skipTo(index))
         }
-        // Smart shuffle arranges a horizon at a time: near its end, arrange the next stretch from the last arranged
-        // song, so songs analysed since the last pass are placed with their analysis.
-        val through = smartThrough
-        if (through >= 0 && smartShuffleEnabled && smartJob?.isActive != true &&
-            queue.index >= through - SmartShuffle.EXTEND_MARGIN && through < queue.snapshot().songs.size - 2
-        ) {
-            arrangeAfter(through)
-        }
+        smart.onTrackChanged()
         val song = queue.current()
         if (song != null) {
             val context = queue.context
