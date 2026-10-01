@@ -54,3 +54,31 @@ pre-approved; anything else needs a one-line request below and the lead's approv
   both sources play is no longer reported as a level jump (`levelJumpDb` on the beat-domain blends drops from
   24-29 dB to 5-14 dB on the fixtures). `TempoGlideModifier` fits its glide into the body of `stemSwap` and
   `drumBreakBridge` (`BeatDomain.PARAM_BODY_BEATS`), which used to render past their windows.
+
+## 0.3.0 — smart shuffle, learning from skips, short tracks, analyzer and beat-alignment fixes
+
+- `TrackAnalysis.CURRENT_VERSION` 2 -> 4 (3: metrical-level check, seeded weighted grid fit, peak-hold transient
+  envelope; 4: the metrical-level check no longer halves backbeats, boom-chick or oom-pah, and needs hat-like
+  off-beats and a halved tempo of at least 55 BPM). Every cache keyed on the version re-analyses, and every
+  `RenderKey` changes, so pre-rendered transitions render again. New public API with defaults: `MetricalLevel` /
+  `MetricalCheck`, `TempoEstimator.halved()`, `OnsetFeatures.rawMidOdf`, extra trailing parameters on
+  `TransientAligner`, `GridFitter` and `RhythmAnalyzer`.
+- `dsp.filter.ZeroPhaseCrossover` (new). `bassSwap` and the recipes' 3-band EQ use it instead of the causal crossover;
+  the live fallback still uses the causal one. Renders of those strategies and recipes change.
+- Metrics: `beatAlignmentMaxMs` is removed and replaced by `beatAlignmentP90Ms`; `beatAlignment*` now compare the
+  render's articulated beats with the sources' attacks, and are absent when no beat has both.
+  `ArtifactMetrics.beatAlignment` takes an optional input. `Signals.onsetTimesSec` (internal) was removed.
+- `PlanCandidate.pinned: Boolean = false` (additive, defaulted; part of equality and `copy()`), set by
+  `DefaultTransitionPlanner` for a used pin (stored, session or one-off).
+- `DefaultProgramBuilder.room(...)`, `roomOrder(...)` and `Room` (new): candidates that leave both neighbours their
+  minimum body first, a pin first unless it would starve a track, the planner's order unchanged when every candidate
+  starves. `build` and `bodySegment` are unchanged.
+- `TransitionCoordinator`: new constructor parameter `onTransitionSkipped: ((TransitionSkip) -> Unit)? = null` and
+  `TransitionSkip`; candidates are tried in room order, a candidate that would starve a track is never rendered (the
+  pair plays body to body, `Gated("No room for a transition")`), `noteUserSkip` reads the position on the caller's
+  thread.
+- `FeedbackLearner` / `FileFeedbackStore`: implicit (skip) tallies. A `feedback.json` that holds skips is written as
+  version 2, which earlier engines cannot read (they keep it aside as `.corrupt`); files without skips stay version 1.
+  New `FileFeedbackStore.reset(strategyId, backup)`: a reset under the store's lock that keeps a `.bak` copy.
+- `dev.muisc.transitions.sequence` (new): `SetSequencer`, `PairCostModel`, `SequenceItem`, `SequenceOptions`,
+  `SequenceResult`, `EnergyArc`.
