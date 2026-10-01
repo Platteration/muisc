@@ -8,14 +8,18 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
 import dev.muisc.analysis.AnalysisCache
+import dev.muisc.analysis.model.TrackAnalysis
+import dev.muisc.app.data.AnalysisFlagUpkeep
 import dev.muisc.app.data.LibraryRepository
 import dev.muisc.app.data.MediaStoreScanner
 import dev.muisc.app.data.RoomAnalysisCache
 import dev.muisc.app.data.ScanResult
 import dev.muisc.app.data.db.MuiscDatabase
 import dev.muisc.app.data.prefs.SettingsRepository
+import dev.muisc.app.playback.AnalysisWorker
 import dev.muisc.app.playback.CustomizationApi
 import dev.muisc.app.playback.EngineController
+import dev.muisc.app.playback.EngineGraph
 import dev.muisc.app.playback.TransitionLabApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -105,6 +109,32 @@ object AppGraph {
             context.startService(intent)
         } catch (e: Exception) {
             // Service missing or background-start restriction: the delegating controller keeps its buffer.
+        }
+    }
+
+    // ---- analysis cache upkeep ----
+
+    /**
+     * Puts the library's "analysed" flags right for the current analyser version and engine rate in the background
+     * ([AnalysisFlagUpkeep]) and, when songs need analysing again (after an update that raised
+     * `TrackAnalysis.CURRENT_VERSION`), schedules the analysis worker under the user's charging constraint. Call
+     * once from `Application.onCreate`; it never blocks startup and never throws.
+     */
+    fun refreshAnalysisFlags() {
+        scope.launch {
+            try {
+                val upkeep = AnalysisFlagUpkeep(db.songDao(), db.analysisDao()) {
+                    val onlyWhileCharging = try {
+                        settings.currentUiPrefs().analyseOnlyWhileCharging
+                    } catch (e: Exception) {
+                        true
+                    }
+                    AnalysisWorker.enqueueNow(context, onlyWhileCharging)
+                }
+                upkeep.run(TrackAnalysis.CURRENT_VERSION, EngineGraph.engineSampleRate(context))
+            } catch (e: Exception) {
+                // The database could not be opened: nothing to put right, and startup must go on.
+            }
         }
     }
 

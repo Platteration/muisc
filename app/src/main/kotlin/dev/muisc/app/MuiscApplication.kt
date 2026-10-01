@@ -14,16 +14,18 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
- * Application entry point: wires [AppGraph], kicks off an incremental library scan when the storage permission is
- * already granted, and keeps the library in sync with MediaStore (content observer → debounced rescan) and with
- * the library settings (min duration / blacklist change → full rescan). The UI calls `AppGraph.requestScan()` itself
- * right after the permission is granted for the first time.
+ * Application entry point: wires [AppGraph], puts the library's "analysed" flags right for the current analyser
+ * version in the background (`AppGraph.refreshAnalysisFlags`), kicks off an incremental library scan when the storage
+ * permission is already granted, and keeps the library in sync with MediaStore (content observer → debounced rescan)
+ * and with the library settings (min duration / blacklist change → full rescan). The UI calls
+ * `AppGraph.requestScan()` itself right after the permission is granted for the first time.
  */
 class MuiscApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
         AppGraph.init(this)
+        AppGraph.refreshAnalysisFlags()
         AppGraph.requestScan(full = false)
         observeMediaStore()
         observeLibrarySettings()

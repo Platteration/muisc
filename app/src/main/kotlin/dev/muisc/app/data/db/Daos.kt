@@ -91,6 +91,19 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE hasAnalysis = 0 ORDER BY dateAdded DESC LIMIT :limit")
     suspend fun unanalysed(limit: Int): List<Song>
 
+    /**
+     * Clears `hasAnalysis` on every song the analysis cache holds no row for at [version] and [sampleRate] (matched by
+     * uri or path, as [markAnalysedBySourceBlocking] matches), so the analysis worker, which picks songs by the flag,
+     * analyses them again. This is what makes a new analyser version re-analyse an already analysed library. A row
+     * written concurrently is never undone: a song whose current row exists is not touched. Returns the songs cleared.
+     */
+    @Query(
+        "UPDATE songs SET hasAnalysis = 0 WHERE hasAnalysis = 1 AND NOT EXISTS (SELECT 1 FROM track_analysis " +
+            "WHERE track_analysis.version = :version AND track_analysis.sampleRate = :sampleRate " +
+            "AND (track_analysis.sourceId = songs.uri OR track_analysis.sourceId = songs.path))",
+    )
+    suspend fun clearStaleAnalysisFlags(version: Int, sampleRate: Int): Int
+
     @Upsert
     suspend fun upsertAll(songs: List<Song>)
 
