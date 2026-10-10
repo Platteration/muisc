@@ -2,6 +2,8 @@ package dev.muisc.audio
 
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
+import java.io.ByteArrayOutputStream
+import java.io.EOFException
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -16,6 +18,16 @@ import kotlin.math.roundToInt
  * Writes 16-bit PCM (default), 24-bit PCM, or 32-bit float.
  */
 object WavIo {
+    /**
+     * WAV chunk lengths come from the file, so they must never be used as an
+     * allocation size without a product limit. These limits also keep a
+     * malformed file from exhausting the process while it is being inspected.
+     */
+    private const val MAX_FMT_CHUNK_BYTES = 1L shl 20
+    private const val MAX_DATA_CHUNK_BYTES = 128L shl 20
+    private const val MAX_DECODED_SAMPLES = 32L shl 20
+    private const val UNKNOWN_CHUNK_SIZE = 0xFFFFFFFFL
+
     enum class Encoding(val bitsPerSample: Int, val isFloat: Boolean) { PCM16(16, false), PCM24(24, false), FLOAT32(32, true) }
 
     fun read(file: File): AudioBuffer = file.inputStream().buffered().use { read(it) }
@@ -41,7 +53,9 @@ object WavIo {
             val size = ByteBuffer.wrap(hdr, 4, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL
             when (id) {
                 "fmt " -> {
-                    val fmt = ByteArray(size.toInt()).also { din.readFully(it) }
+                    require(size >= 16L) { "WAVE fmt chunk is too small" }
+                    require(size <= MAX_FMT_CHUNK_BYTES) { "WAVE fmt chunk is too large" }
+                    val fmt = readExactly(din, size.toInt())
                     val bb = ByteBuffer.wrap(fmt).order(ByteOrder.LITTLE_ENDIAN)
                     formatTag = bb.short.toInt() and 0xFFFF
                     channels = bb.short.toInt() and 0xFFFF
@@ -58,12 +72,15 @@ object WavIo {
                     if (size % 2L == 1L) din.readByte()
                 }
                 "data" -> {
-                    val toRead = if (size == 0xFFFFFFFFL || size == 0L) Long.MAX_VALUE else size
-                    data = if (toRead == Long.MAX_VALUE) din.readAllBytes() else ByteArray(toRead.toInt()).also { din.readFully(it) }
+                    data = if (size == UNKNOWN_CHUNK_SIZE || size == 0L) {
+                        readUntilEof(din, MAX_DATA_CHUNK_BYTES)
+                    } else {
+                        require(size <= MAX_DATA_CHUNK_BYTES) { "WAVE data chunk is too large" }
+                        readExactly(din, size.toInt())
+                    }
                 }
                 else -> {
-                    var remaining = size + (size % 2)
-                    while (remaining > 0) { val s = din.skip(remaining); if (s <= 0) break; remaining -= s }
+                    skipExactly(din, size + (size % 2L))
                 }
             }
         }
@@ -71,8 +88,15 @@ object WavIo {
         require(channels > 0 && sampleRate > 0) { "WAVE file has no fmt chunk" }
         val isFloat = formatTag == 3
         require(formatTag == 1 || isFloat) { "unsupported WAVE format tag $formatTag" }
+        require(if (isFloat) bits == 32 || bits == 64 else bits == 8 || bits == 16 || bits == 24 || bits == 32) {
+            "unsupported bit depth $bits"
+        }
         val bytesPerSample = bits / 8
-        val frames = bytes.size / (bytesPerSample * channels)
+        val frameBytes = bytesPerSample.toLong() * channels
+        require(frameBytes > 0 && frameBytes <= Int.MAX_VALUE) { "invalid WAVE frame size" }
+        val frameCount = bytes.size.toLong() / frameBytes
+        require(frameCount <= MAX_DECODED_SAMPLES / channels) { "WAVE audio is too large to decode" }
+        val frames = frameCount.toInt()
         val out = Array(channels) { FloatArray(frames) }
         val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         when {
@@ -88,6 +112,36 @@ object WavIo {
             else -> throw IllegalArgumentException("unsupported bit depth $bits")
         }
         return AudioBuffer(sampleRate, out)
+    }
+
+    private fun readExactly(input: DataInputStream, size: Int): ByteArray =
+        ByteArray(size).also { input.readFully(it) }
+
+    private fun readUntilEof(input: DataInputStream, limit: Long): ByteArray {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            total += n
+            require(total <= limit) { "WAVE data chunk is too large" }
+            output.write(buffer, 0, n)
+        }
+        return output.toByteArray()
+    }
+
+    private fun skipExactly(input: DataInputStream, requested: Long) {
+        var remaining = requested
+        while (remaining > 0) {
+            val skipped = input.skip(remaining)
+            if (skipped > 0) {
+                remaining -= skipped
+                continue
+            }
+            if (input.read() < 0) throw EOFException("truncated WAVE chunk")
+            remaining--
+        }
     }
 
     fun write(file: File, buffer: AudioBuffer, encoding: Encoding = Encoding.PCM16) {

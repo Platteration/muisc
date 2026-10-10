@@ -106,7 +106,16 @@ class PlaybackService : MediaLibraryService() {
         )
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? = session
+    /**
+     * The service is exported for Android Auto and system media controls, but
+     * an exported MediaLibraryService is also a writable IPC surface. Only
+     * this app and controllers trusted by MediaSessionManager may connect.
+     */
+    private fun isAllowedController(controllerInfo: MediaSession.ControllerInfo): Boolean =
+        controllerInfo.packageName == packageName || controllerInfo.isTrusted
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? =
+        session?.takeIf { isAllowedController(controllerInfo) }
 
     /** Swiping the app away stops the service unless something is still playing. */
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -152,6 +161,7 @@ class PlaybackService : MediaLibraryService() {
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
         ): MediaSession.ConnectionResult {
+            if (!isAllowedController(controller)) return MediaSession.ConnectionResult.reject()
             val base = super.onConnect(session, controller)
             val commands = base.availableSessionCommands.buildUpon()
                 .add(SessionCommand(COMMAND_TOGGLE_TRANSITIONS, Bundle.EMPTY))
@@ -166,6 +176,9 @@ class PlaybackService : MediaLibraryService() {
             customCommand: SessionCommand,
             args: Bundle,
         ): ListenableFuture<SessionResult> {
+            if (!isAllowedController(controller)) {
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_PERMISSION_DENIED))
+            }
             val engine = this@PlaybackService.controller
                 ?: return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_INVALID_STATE))
             return when (customCommand.customAction) {
@@ -195,13 +208,18 @@ class PlaybackService : MediaLibraryService() {
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>,
-        ): ListenableFuture<MutableList<MediaItem>> = future {
-            val resolved = ArrayList<MediaItem>(mediaItems.size)
-            for (item in mediaItems) {
-                val song = item.mediaId.toLongOrNull()?.let { library.songById(it) }
-                resolved += if (song != null) MuiscPlayer.mediaItem(song) else item
+        ): ListenableFuture<MutableList<MediaItem>> {
+            if (!isAllowedController(controller)) {
+                return Futures.immediateFailedFuture(SecurityException("untrusted media controller"))
             }
-            resolved
+            return future {
+                val resolved = ArrayList<MediaItem>(mediaItems.size)
+                for (item in mediaItems) {
+                    val song = item.mediaId.toLongOrNull()?.let { library.songById(it) }
+                    resolved += if (song != null) MuiscPlayer.mediaItem(song) else item
+                }
+                resolved
+            }
         }
 
         override fun onGetLibraryRoot(
@@ -209,7 +227,9 @@ class PlaybackService : MediaLibraryService() {
             browser: MediaSession.ControllerInfo,
             params: LibraryParams?,
         ): ListenableFuture<LibraryResult<MediaItem>> =
-            Futures.immediateFuture(
+            if (!isAllowedController(browser)) {
+                Futures.immediateFuture(LibraryResult.ofError(SessionResult.RESULT_ERROR_PERMISSION_DENIED))
+            } else Futures.immediateFuture(
                 LibraryResult.ofItem(browsable(ROOT_ID, ROOT_TITLE, MediaMetadata.MEDIA_TYPE_FOLDER_MIXED), params)
             )
 
@@ -217,16 +237,21 @@ class PlaybackService : MediaLibraryService() {
             session: MediaLibrarySession,
             browser: MediaSession.ControllerInfo,
             mediaId: String,
-        ): ListenableFuture<LibraryResult<MediaItem>> = future {
-            val songId = mediaId.toLongOrNull()
-            if (songId != null) {
-                val song = library.songById(songId)
-                if (song != null) LibraryResult.ofItem(MuiscPlayer.mediaItem(song), null)
-                else LibraryResult.ofError(SessionResult.RESULT_ERROR_BAD_VALUE)
-            } else {
-                val node = nodeItem(mediaId)
-                if (node != null) LibraryResult.ofItem(node, null)
-                else LibraryResult.ofError(SessionResult.RESULT_ERROR_BAD_VALUE)
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            if (!isAllowedController(browser)) {
+                return Futures.immediateFuture(LibraryResult.ofError(SessionResult.RESULT_ERROR_PERMISSION_DENIED))
+            }
+            return future {
+                val songId = mediaId.toLongOrNull()
+                if (songId != null) {
+                    val song = library.songById(songId)
+                    if (song != null) LibraryResult.ofItem(MuiscPlayer.mediaItem(song), null)
+                    else LibraryResult.ofError(SessionResult.RESULT_ERROR_BAD_VALUE)
+                } else {
+                    val node = nodeItem(mediaId)
+                    if (node != null) LibraryResult.ofItem(node, null)
+                    else LibraryResult.ofError(SessionResult.RESULT_ERROR_BAD_VALUE)
+                }
             }
         }
 
@@ -237,10 +262,15 @@ class PlaybackService : MediaLibraryService() {
             page: Int,
             pageSize: Int,
             params: LibraryParams?,
-        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> = future {
-            val all = childrenOf(parentId)
-            val paged = if (pageSize > 0) all.drop(page * pageSize).take(pageSize) else all
-            LibraryResult.ofItemList(ImmutableList.copyOf(paged), params)
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            if (!isAllowedController(browser)) {
+                return Futures.immediateFuture(LibraryResult.ofError(SessionResult.RESULT_ERROR_PERMISSION_DENIED))
+            }
+            return future {
+                val all = childrenOf(parentId)
+                val paged = if (pageSize > 0) all.drop(page * pageSize).take(pageSize) else all
+                LibraryResult.ofItemList(ImmutableList.copyOf(paged), params)
+            }
         }
     }
 
